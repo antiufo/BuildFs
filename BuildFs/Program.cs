@@ -1,8 +1,12 @@
 ﻿using DokanNet;
+using Microsoft.Win32.SafeHandles;
 using Shaman.Runtime;
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
+using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -11,47 +15,71 @@ namespace BuildFs
 {
     class Program
     {
+
         static void Main(string[] args)
         {
-           // ProcessUtils.RunPassThroughFrom("C:\\temp", "csc.exe", "/?");
-            
+
             var fs = BuildFsFileSystem.Mount('R');
             // TODO: docgen, finaldoc
+
             fs.AddProject(@"C:\Repositories\Awdee", "awdee");
-            RunAwdeeCached(fs, "nuget-restore");
-           /* RunAwdeeCached(fs, "confuser-cs");
-            RunAwdeeCached(fs, "core-available-location-icons");
-            RunAwdeeCached(fs, "core-phantomts");
-            RunAwdeeCached(fs, "core-compile");
 
-            // website-all
-            RunAwdeeCached(fs, "website-grunt-install");
-            RunAwdeeCached(fs, "website-json-css");
-            RunAwdeeCached(fs, "website-json-css");
-            RunAwdeeCached(fs, "website-copy");
-            RunAwdeeCached(fs, "website-grunt");
-            RunAwdeeCached(fs, "website-files-folder");
-            RunAwdeeCached(fs, "website-restore");
-            */
-            /*while (true)
+            try
             {
-                Thread.Sleep(400000);
-            }*/
 
-        }
+                RunAwdeeNmake(fs, "nuget-restore");
+                RunAwdeeNmake(fs, "confuser-cs");
+                RunAwdeeNmake(fs, "core-available-location-icons");
+                RunAwdeeNmake(fs, "core-phantomts");
+                RunAwdeeNmake(fs, "core-compile");
 
-        private static void RunAwdeeCached(BuildFsFileSystem fs, string v)
-        {
-            fs.RunCached("awdee", "Xamasoft.Awdee.Build", "nmake", v);
-        }
+                //// website-all
+                RunAwdeeNmake(fs, "website-grunt-install");
+                RunAwdeeNmake(fs, "website-json-css");
+                RunAwdeeNmake(fs, "website-copyjs");
+                RunAwdeeGrunt(fs, "less");
+                RunAwdeeGrunt(fs, "typescript:base");
+                RunAwdeeGrunt(fs, "uglify:editor");
+                RunAwdeeGrunt(fs, "uglify:offload");
+                RunAwdeeGrunt(fs, "uglify:admin");
+                RunAwdeeGrunt(fs, "uglify:explore");
+                RunAwdeeGrunt(fs, "uglify:ace");
+                RunAwdeeGrunt(fs, "uglify:explorehtml");
+                RunAwdeeNmake(fs, "website-files-folder");
+                RunAwdeeNmake(fs, "website-restore");
 
-        private static void RunAwdeeCached(BuildFsFileSystem fs, params string[] tasks)
-        {
-            foreach (var item in tasks)
+                RunAwdeeNmake(fs, "core-adblock-update");
+                RunAwdeeNmake(fs, "core-compile");
+                RunAwdeeNmake(fs, "ws-refasm-copy-orig");
+                RunAwdeeNmake(fs, "ws-refasm");
+                RunAwdeeNmake(fs, "ws-refasm-shaman");
+                if (Debugger.IsAttached)
+                    Console.WriteLine("Done.");
+            }
+            catch (Exception ex)
             {
-                RunAwdeeCached(fs, item);
+                Console.WriteLine(ex.Message);
             }
             
+            //while (true) Thread.Sleep(400000);
+            
         }
+
+        private static void RunAwdeeGrunt(BuildFsFileSystem fs, string name)
+        {
+            RunAwdee(fs, "Xamasoft.Awdee.WebSite", "cmd", "/c", "grunt", name);
+        }
+
+        private static void RunAwdeeNmake(BuildFsFileSystem fs, string v)
+        {
+            RunAwdee(fs, "Xamasoft.Awdee.Build", "nmake", v);
+        }
+
+        private static void RunAwdee(BuildFsFileSystem fs, string folder, string v, params object[] args)
+        {
+            fs.RunCached("awdee", folder, v, args);
+        }
+
+
     }
 }
