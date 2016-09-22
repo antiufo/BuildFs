@@ -11,6 +11,11 @@ using static DokanNet.FormatProviders;
 using FileAccess = DokanNet.FileAccess;
 using System.Text.RegularExpressions;
 using Shaman.Runtime;
+using System.Security.Cryptography;
+using System.Text;
+using System.Threading.Tasks;
+using System.Diagnostics;
+using System.Threading;
 
 namespace BuildFs
 {
@@ -23,6 +28,155 @@ namespace BuildFs
                                               FileAccess.GenericExecute | FileAccess.GenericWrite |
                                               FileAccess.GenericRead;
 
+        public void RunCached(string proj, string workingDir, string command, params object[] args)
+        {
+            if (!Path.IsPathRooted(workingDir)) workingDir = Path.Combine("R:\\", proj, workingDir);
+            var arr2 = new List<string>();
+            arr2.Add("Run");
+            arr2.Add(workingDir);
+            arr2.Add(command);
+            arr2.AddRange(args.Select(x => x.ToString()));
+
+            var key = string.Join("\n", arr2);
+            RunCached(proj, key, () =>
+            {
+                Console.WriteLine("Running from " + workingDir + ": " + ProcessUtils.GetCommandLine(command, args));
+                ProcessUtils.RunPassThroughFrom(workingDir, command, args);
+            });
+        }
+
+
+        public void RunCached(string proj, string key, Action action)
+        {
+            string keyHash;
+            using (var sha1 = new SHA1Cng())
+            {
+                keyHash = Convert.ToBase64String(sha1.ComputeHash(Encoding.UTF8.GetBytes(proj + "\n" + key)))
+                    .Replace("/", "-")
+                    .Replace("+", "_")
+                    .Replace("=", string.Empty);
+            }
+
+            lock (_runLock)
+            {
+                using (var info = JsonFile.Open<ExecutionSummary>(Path.Combine("C:\\BuildFs\\Cache", keyHash + ".pb")))
+                {
+                    if (info.Content.Available && IsStatusStillValid(proj, info.Content))
+                    {
+                        Console.WriteLine("No need to run " + keyHash);
+                        info.DiscardAll();
+                    }
+                    else
+                    {
+                        ClearStatus(proj);
+                        action();
+                        var changes = CaptureChanges(proj);
+                        info.Content.Inputs = changes.Inputs;
+                        info.Content.Outputs = changes.Outputs;
+                        info.Content.Available = true;
+                    }
+                }
+            }
+        }
+        private object _runLock = new object();
+
+        internal bool IsStatusStillValid(string v, ExecutionSummary changes)
+        {
+            lock (_lock)
+            {
+                var proj = GetProjectByNameHasLock(v);
+                if (changes.Inputs != null)
+                {
+                    foreach (var item in changes.Inputs)
+                    {
+                        var current = CaptureItemStatus(GetPathAware(item.Path)) ?? new ItemStatus();
+                        if (current.Attributes != item.Attributes)
+                        {
+                            Console.WriteLine("Changed attributes: " + item.Path);
+                            return false;
+                        }
+                        if (current.LastWriteTime != item.LastWriteTime)
+                        {
+                            Console.WriteLine("Changed last write time: " + item.Path);
+                            return false;
+                        }
+                        if (current.Size != item.Size)
+                        {
+                            Console.WriteLine("Changed size: " + item.Path);
+                            return false;
+                        }
+
+                    }
+                }
+            }
+            return true;
+        }
+
+        internal ExecutionSummary CaptureChanges(string v)
+        {
+            lock (_lock)
+            {
+                var outputs = new List<string>();
+                var inputs = new List<ItemStatus>();
+                var proj = GetProjectByNameHasLock(v);
+                foreach (var item in proj.Items)
+                {
+                    var pair = item.Value;
+                    if (pair.Changed)
+                    {
+                        var physicalPath = GetPathAware(item.Key);
+                        pair.After = CaptureItemStatus(physicalPath);
+                        if (pair.Before != null && pair.Before.ContentsHash != null && (pair.After.Attributes & FileAttributes.Directory) == 0)
+                        {
+                            pair.After.ContentsHash = CaptureHash(item.Key);
+                            if (ByteArraysEqual(pair.Before.ContentsHash, pair.After.ContentsHash))
+                            {
+                                pair.Changed = false;
+                                if (pair.Before.LastWriteTime != pair.After.LastWriteTime)
+                                {
+                                    File.SetLastWriteTimeUtc(physicalPath, pair.Before.LastWriteTime);
+                                }
+                            }
+                        }
+                    }
+
+                    if (pair.Changed)
+                    {
+                        outputs.Add(item.Key);
+                    }
+                    else if(Path.GetFileName(item.Key) != "makefile") // TODO temp
+                    {
+                        var k = pair.Before;
+                        if (k == null) k = new ItemStatus();
+                        k.Path = item.Key;
+                        inputs.Add(k);
+                    }
+                }
+                return new ExecutionSummary() { Inputs = inputs, Outputs = outputs };
+            }
+        }
+
+        private bool ByteArraysEqual(byte[] contentsHash1, byte[] contentsHash2)
+        {
+            if (contentsHash1.Length != contentsHash2.Length) return false;
+            for (int i = 0; i < contentsHash1.Length; i++)
+            {
+                if (contentsHash1[i] != contentsHash2[i]) return false;
+            }
+            return true;
+        }
+
+        internal void ClearStatus(string projectName)
+        {
+            lock (_lock)
+            {
+                var k = GetProjectByNameHasLock(projectName);
+                k.Items.Clear();
+                k.readFiles.Clear();
+                k.changedFiles.Clear();
+            }
+        }
+
         private const FileAccess DataWriteAccess = FileAccess.WriteData | FileAccess.AppendData |
                                                    FileAccess.Delete |
                                                    FileAccess.GenericWrite;
@@ -31,9 +185,6 @@ namespace BuildFs
 
         public BuildFsFileSystem()
         {
-            File.Delete(@"..\..\BuildFs.RepositoryStatus.json");
-            repositoryStatus = JsonFile.Open<RepositoryStatus>();
-            if (repositoryStatus.Content.Items == null) repositoryStatus.Content.Items = new Dictionary<string, BuildFs.ItemPair>();
         }
 
 
@@ -48,21 +199,37 @@ namespace BuildFs
         }
         private string GetPathAware(string fileName)
         {
-            if (fileName == "\\") return null;
-            var path = fileName.SplitFast('\\');
             lock (_lock)
             {
-                var proj = projects.FirstOrDefault(x => x.Key == path[1]);
-                if (proj.Value == null) return null;
-                return proj.Value.Path + fileName.Substring(1 + proj.Key.Length);
+                var proj = GetProjectFromPathHasLock(fileName);
+                if (proj == null) return null;
+                return proj.Path + fileName.Substring(1 + proj.Name.Length);
             }
         }
 
+        private Project GetProjectFromPathHasLock(string fileName)
+        {
+            if (fileName == "\\") return null;
+            var path = fileName.SplitFast('\\');
+
+            var proj = projects.FirstOrDefault(x => x.Key == path[1]);
+            if (proj.Value == null) return null;
+            return proj.Value;
+        }
+
+        private Project GetProjectByNameHasLock(string projectName)
+        {
+            return projects.First(x => x.Key == projectName).Value;
+        }
         internal void AddProject(string path, string name)
         {
             var proj = new Project()
             {
-                Path = path
+                Path = path,
+                Name = name,
+                changedFiles = new HashSet<string>(),
+                Items = new Dictionary<string, BuildFs.ItemPair>(),
+                readFiles = new HashSet<string>()
             };
             lock (_lock)
             {
@@ -71,8 +238,7 @@ namespace BuildFs
         }
 
         private object _lock = new object();
-        private HashSet<string> readFiles = new HashSet<string>();
-        private HashSet<string> changedFiles = new HashSet<string>();
+        private char Letter;
 
         private NtStatus Trace(string method, string fileName, DokanFileInfo info, NtStatus result,
             params object[] parameters)
@@ -106,8 +272,6 @@ namespace BuildFs
         public NtStatus CreateFile(string fileName, FileAccess access, FileShare share, FileMode mode,
             FileOptions options, FileAttributes attributes, DokanFileInfo info)
         {
-            if (fileName.Contains("savecat")) SaveRepositoryStatus();
-            OnFileRead(fileName);
 
             var modifies =
                 FileAccess.AccessSystemSecurity |
@@ -122,12 +286,20 @@ namespace BuildFs
                 FileAccess.WriteAttributes |
                 FileAccess.WriteData |
                 FileAccess.WriteExtendedAttributes;
+            
+            if (
+                fileName.IndexOf('*') != -1 ||
+                fileName.IndexOf('?') != -1 ||
+                fileName.IndexOf('>') != -1 ||
+                fileName.IndexOf('<') != -1
+                ) return DokanResult.PathNotFound;
+
             OnFileRead(fileName);
             if ((access & modifies) != 0)
             {
                 OnFileChanged(fileName);
             }
-            if (fileName.IndexOf('*') != -1 || fileName.IndexOf('>') != -1) return DokanResult.PathNotFound;
+
             if (fileName == "\\")
             {
                 if (mode != FileMode.Open) return DokanResult.AlreadyExists;
@@ -360,35 +532,59 @@ namespace BuildFs
         {
             lock (_lock)
             {
-                if (changedFiles.Add(fileName))
+                var proj = GetProjectFromPathHasLock(fileName);
+                if (proj != null && proj.changedFiles.Add(fileName))
                 {
                     Console.WriteLine("Changed: " + fileName);
-                    var pair = GetItemPair(fileName);
+                    var pair = GetItemPairHasLock(fileName);
                     if (pair != null)
                     {
                         pair.Changed = true;
+                        var before = pair.Before;
+                        if (before != null)
+                        {
+                            if ((before.Attributes & FileAttributes.Directory) == 0)
+                            {
+                                before.ContentsHash = CaptureHash(fileName);
+                            }
+                        }
                     }
                 }
             }
         }
+
+        private byte[] CaptureHash(string fileName)
+        {
+            using (var stream = File.Open(GetPathAware(fileName), FileMode.Open, System.IO.FileAccess.Read, FileShare.Delete | FileShare.Read))
+            using (var sha1 = new SHA1Cng())
+            {
+                return sha1.ComputeHash(stream);
+            }
+        }
+
         private void OnFileRead(string fileName)
         {
             lock (_lock)
             {
-                if (readFiles.Add(fileName))
+                var proj = GetProjectFromPathHasLock(fileName);
+                if (proj != null && proj.readFiles.Add(fileName))
                 {
                     Console.WriteLine("Read: " + fileName);
-                    var pair = GetItemPair(fileName);
+                    var pair = GetItemPairHasLock(fileName);
                 }
             }
         }
         private void SaveRepositoryStatus()
         {
-            repositoryStatus.Save();
+            lock (_lock)
+            {
+            }
         }
-        private ItemPair GetItemPair(string fileName)
+        private ItemPair GetItemPairHasLock(string fileName)
         {
-            var k = repositoryStatus.Content.Items;
+            var proj = GetProjectFromPathHasLock(fileName);
+            if (proj == null) return null;
+            var k = proj.Items;
             ItemPair m;
             if (k.TryGetValue(fileName, out m)) return m;
 
@@ -404,7 +600,12 @@ namespace BuildFs
             if (File.Exists(physicalPath))
             {
                 var fi = new FileInfo(physicalPath);
-                return new ItemStatus() { Attributes = fi.Attributes, LastWriteTime = fi.LastWriteTimeUtc, Size = fi.Length };
+                return new ItemStatus()
+                {
+                    Attributes = fi.Attributes | FileAttributes.Archive,
+                    LastWriteTime = fi.LastWriteTimeUtc,
+                    Size = fi.Length
+                };
             }
             else if (Directory.Exists(physicalPath))
             {
@@ -413,8 +614,6 @@ namespace BuildFs
             }
             return null;
         }
-
-        private JsonFile<RepositoryStatus> repositoryStatus;
 
         public NtStatus WriteFile(string fileName, byte[] buffer, out int bytesWritten, long offset, DokanFileInfo info)
         {
@@ -756,8 +955,6 @@ namespace BuildFs
 
         public NtStatus Unmounted(DokanFileInfo info)
         {
-            repositoryStatus.Dispose();
-            repositoryStatus = null;
             return Trace(nameof(Unmounted), null, info, DokanResult.Success);
         }
 
@@ -779,6 +976,8 @@ namespace BuildFs
         public IList<FileInformation> FindFilesHelper(string fileName, string searchPattern)
         {
             OnFileRead(fileName);
+            searchPattern = searchPattern.Replace('>', '?');
+            searchPattern = searchPattern.Replace('<', '*');
             if (fileName == "\\")
             {
                 lock (_lock)
@@ -809,8 +1008,8 @@ namespace BuildFs
         private bool MatchesPattern(string key, string searchPattern)
         {
             if (searchPattern == "*") return true;
-            if (searchPattern.IndexOf('>') == -1 && searchPattern.IndexOf('*') == -1) return key.Equals(searchPattern, StringComparison.OrdinalIgnoreCase);
-            return Regex.IsMatch(key, "^" + Regex.Escape(searchPattern).Replace(@"\*", ".*").Replace(@">", ".") + "$", RegexOptions.IgnoreCase);
+            if (searchPattern.IndexOf('?') == -1 && searchPattern.IndexOf('*') == -1) return key.Equals(searchPattern, StringComparison.OrdinalIgnoreCase);
+            return Regex.IsMatch(key, "^" + Regex.Escape(searchPattern).Replace(@"\*", ".*").Replace(@"\?", ".") + "$", RegexOptions.IgnoreCase);
         }
 
         public NtStatus FindFilesWithPattern(string fileName, string searchPattern, out IList<FileInformation> files,
@@ -820,7 +1019,24 @@ namespace BuildFs
 
             return Trace(nameof(FindFilesWithPattern), fileName, info, DokanResult.Success);
         }
-        
+
+        public static BuildFsFileSystem Mount(char letter)
+        {
+            Dokan.Unmount(letter);
+
+            var fs = new BuildFsFileSystem();
+            fs.Letter = letter;
+            var t = Task.Run(() => Dokan.Mount(fs, letter + ":", DokanOptions.DebugMode/* | DokanOptions.StderrOutput*/, 1));
+            var e = Stopwatch.StartNew();
+            while (e.ElapsedMilliseconds < 3000)
+            {
+                Thread.Sleep(200);
+                if (t.Exception != null) throw t.Exception;
+                if (Directory.Exists(letter + ":\\")) return fs;
+            }
+            return fs;
+        }
+
         #endregion Implementation of IDokanOperations
     }
 }
