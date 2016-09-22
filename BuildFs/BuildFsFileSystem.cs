@@ -9,12 +9,14 @@ using DokanNet;
 using DokanNet.Logging;
 using static DokanNet.FormatProviders;
 using FileAccess = DokanNet.FileAccess;
+using System.Text.RegularExpressions;
+using Shaman.Runtime;
 
-namespace DokanNetMirror
+namespace BuildFs
 {
-    internal class Mirror : IDokanOperations
+    internal class BuildFsFileSystem : IDokanOperations
     {
-        private readonly string path;
+        private readonly Dictionary<string, Project> projects = new Dictionary<string, Project>();
 
         private const FileAccess DataAccess = FileAccess.ReadData | FileAccess.WriteData | FileAccess.AppendData |
                                               FileAccess.Execute |
@@ -27,17 +29,50 @@ namespace DokanNetMirror
 
         private ConsoleLogger logger = new ConsoleLogger("[Mirror] ");
 
-        public Mirror(string path)
+        public BuildFsFileSystem()
         {
-            if (!Directory.Exists(path))
-                throw new ArgumentException(nameof(path));
-            this.path = path;
+            File.Delete(@"..\..\BuildFs.RepositoryStatus.json");
+            repositoryStatus = JsonFile.Open<RepositoryStatus>();
+            if (repositoryStatus.Content.Items == null) repositoryStatus.Content.Items = new Dictionary<string, BuildFs.ItemPair>();
         }
+
 
         private string GetPath(string fileName)
         {
-            return path + fileName;
+            var p = GetPathAware(fileName);
+            if (p == null)
+            {
+                return "C:\\NON_EXISTING_PATH";
+            }
+            return p;
         }
+        private string GetPathAware(string fileName)
+        {
+            if (fileName == "\\") return null;
+            var path = fileName.SplitFast('\\');
+            lock (_lock)
+            {
+                var proj = projects.FirstOrDefault(x => x.Key == path[1]);
+                if (proj.Value == null) return null;
+                return proj.Value.Path + fileName.Substring(1 + proj.Key.Length);
+            }
+        }
+
+        internal void AddProject(string path, string name)
+        {
+            var proj = new Project()
+            {
+                Path = path
+            };
+            lock (_lock)
+            {
+                projects[name] = proj;
+            }
+        }
+
+        private object _lock = new object();
+        private HashSet<string> readFiles = new HashSet<string>();
+        private HashSet<string> changedFiles = new HashSet<string>();
 
         private NtStatus Trace(string method, string fileName, DokanFileInfo info, NtStatus result,
             params object[] parameters)
@@ -71,8 +106,40 @@ namespace DokanNetMirror
         public NtStatus CreateFile(string fileName, FileAccess access, FileShare share, FileMode mode,
             FileOptions options, FileAttributes attributes, DokanFileInfo info)
         {
+            if (fileName.Contains("savecat")) SaveRepositoryStatus();
+            OnFileRead(fileName);
+
+            var modifies =
+                FileAccess.AccessSystemSecurity |
+                FileAccess.AppendData |
+                FileAccess.ChangePermissions |
+                FileAccess.Delete |
+                FileAccess.DeleteChild |
+                FileAccess.GenericAll |
+                FileAccess.GenericWrite |
+                FileAccess.MaximumAllowed |
+                FileAccess.SetOwnership |
+                FileAccess.WriteAttributes |
+                FileAccess.WriteData |
+                FileAccess.WriteExtendedAttributes;
+            OnFileRead(fileName);
+            if ((access & modifies) != 0)
+            {
+                OnFileChanged(fileName);
+            }
+            if (fileName.IndexOf('*') != -1 || fileName.IndexOf('>') != -1) return DokanResult.PathNotFound;
+            if (fileName == "\\")
+            {
+                if (mode != FileMode.Open) return DokanResult.AlreadyExists;
+                info.IsDirectory = true;
+                info.Context = new object();
+                return NtStatus.Success;
+            }
+
             NtStatus result = NtStatus.Success;
-            var filePath = GetPath(fileName);
+            var filePath = GetPathAware(fileName);
+
+            if (filePath == null) return DokanResult.PathNotFound;
 
             if (info.IsDirectory)
             {
@@ -138,7 +205,7 @@ namespace DokanNetMirror
                 try
                 {
                     pathExists = (Directory.Exists(filePath) || File.Exists(filePath));
-                    pathIsDirectory = File.GetAttributes(filePath).HasFlag(FileAttributes.Directory);
+                    pathIsDirectory = pathExists && File.GetAttributes(filePath).HasFlag(FileAttributes.Directory);
                 }
                 catch (IOException)
                 {
@@ -239,6 +306,7 @@ namespace DokanNetMirror
 
             if (info.DeleteOnClose)
             {
+                OnFileChanged(fileName);
                 if (info.IsDirectory)
                 {
                     Directory.Delete(GetPath(fileName));
@@ -266,6 +334,7 @@ namespace DokanNetMirror
 
         public NtStatus ReadFile(string fileName, byte[] buffer, out int bytesRead, long offset, DokanFileInfo info)
         {
+            OnFileRead(fileName);
             if (info.Context == null) // memory mapped read
             {
                 using (var stream = new FileStream(GetPath(fileName), FileMode.Open, System.IO.FileAccess.Read))
@@ -287,8 +356,69 @@ namespace DokanNetMirror
                 offset.ToString(CultureInfo.InvariantCulture));
         }
 
+        private void OnFileChanged(string fileName)
+        {
+            lock (_lock)
+            {
+                if (changedFiles.Add(fileName))
+                {
+                    Console.WriteLine("Changed: " + fileName);
+                    var pair = GetItemPair(fileName);
+                    if (pair != null)
+                    {
+                        pair.Changed = true;
+                    }
+                }
+            }
+        }
+        private void OnFileRead(string fileName)
+        {
+            lock (_lock)
+            {
+                if (readFiles.Add(fileName))
+                {
+                    Console.WriteLine("Read: " + fileName);
+                    var pair = GetItemPair(fileName);
+                }
+            }
+        }
+        private void SaveRepositoryStatus()
+        {
+            repositoryStatus.Save();
+        }
+        private ItemPair GetItemPair(string fileName)
+        {
+            var k = repositoryStatus.Content.Items;
+            ItemPair m;
+            if (k.TryGetValue(fileName, out m)) return m;
+
+            var z = GetPathAware(fileName);
+            if (z == null) return null;
+
+            k[fileName] = new ItemPair() { Before = CaptureItemStatus(z) };
+            return m;
+        }
+
+        private ItemStatus CaptureItemStatus(string physicalPath)
+        {
+            if (File.Exists(physicalPath))
+            {
+                var fi = new FileInfo(physicalPath);
+                return new ItemStatus() { Attributes = fi.Attributes, LastWriteTime = fi.LastWriteTimeUtc, Size = fi.Length };
+            }
+            else if (Directory.Exists(physicalPath))
+            {
+                var di = new DirectoryInfo(physicalPath);
+                return new ItemStatus() { Attributes = di.Attributes };
+            }
+            return null;
+        }
+
+        private JsonFile<RepositoryStatus> repositoryStatus;
+
         public NtStatus WriteFile(string fileName, byte[] buffer, out int bytesWritten, long offset, DokanFileInfo info)
         {
+            OnFileChanged(fileName);
             if (info.Context == null)
             {
                 using (var stream = new FileStream(GetPath(fileName), FileMode.Open, System.IO.FileAccess.Write))
@@ -327,6 +457,16 @@ namespace DokanNetMirror
 
         public NtStatus GetFileInformation(string fileName, out FileInformation fileInfo, DokanFileInfo info)
         {
+            OnFileRead(fileName);
+            if (fileName == "\\")
+            {
+                fileInfo = new FileInformation()
+                {
+                    Attributes = FileAttributes.Directory,
+                    FileName = fileName
+                };
+                return NtStatus.Success;
+            }
             // may be called with info.Context == null, but usually it isn't
             var filePath = GetPath(fileName);
             FileSystemInfo finfo = new FileInfo(filePath);
@@ -356,6 +496,7 @@ namespace DokanNetMirror
 
         public NtStatus SetFileAttributes(string fileName, FileAttributes attributes, DokanFileInfo info)
         {
+            OnFileChanged(fileName);
             try
             {
                 File.SetAttributes(GetPath(fileName), attributes);
@@ -378,6 +519,7 @@ namespace DokanNetMirror
         public NtStatus SetFileTime(string fileName, DateTime? creationTime, DateTime? lastAccessTime,
             DateTime? lastWriteTime, DokanFileInfo info)
         {
+            OnFileChanged(fileName);
             try
             {
                 var filePath = GetPath(fileName);
@@ -407,6 +549,7 @@ namespace DokanNetMirror
 
         public NtStatus DeleteFile(string fileName, DokanFileInfo info)
         {
+            OnFileChanged(fileName);
             var filePath = GetPath(fileName);
 
             if (Directory.Exists(filePath))
@@ -424,6 +567,7 @@ namespace DokanNetMirror
 
         public NtStatus DeleteDirectory(string fileName, DokanFileInfo info)
         {
+            OnFileChanged(fileName);
             return Trace(nameof(DeleteDirectory), fileName, info,
                 Directory.EnumerateFileSystemEntries(GetPath(fileName)).Any()
                     ? DokanResult.DirectoryNotEmpty
@@ -433,8 +577,12 @@ namespace DokanNetMirror
 
         public NtStatus MoveFile(string oldName, string newName, bool replace, DokanFileInfo info)
         {
+            OnFileRead(oldName);
+            OnFileChanged(oldName);
+            OnFileChanged(newName);
             var oldpath = GetPath(oldName);
-            var newpath = GetPath(newName);
+            var newpath = GetPathAware(newName);
+            if (newpath == null) return DokanResult.PathNotFound;
 
             (info.Context as FileStream)?.Dispose();
             info.Context = null;
@@ -479,6 +627,7 @@ namespace DokanNetMirror
 
         public NtStatus SetEndOfFile(string fileName, long length, DokanFileInfo info)
         {
+            OnFileChanged(fileName);
             try
             {
                 ((FileStream)(info.Context)).SetLength(length);
@@ -494,6 +643,7 @@ namespace DokanNetMirror
 
         public NtStatus SetAllocationSize(string fileName, long length, DokanFileInfo info)
         {
+            OnFileChanged(fileName);
             try
             {
                 ((FileStream)(info.Context)).SetLength(length);
@@ -539,13 +689,10 @@ namespace DokanNetMirror
 
         public NtStatus GetDiskFreeSpace(out long free, out long total, out long used, DokanFileInfo info)
         {
-            var dinfo = DriveInfo.GetDrives().Single(di => di.RootDirectory.Name == Path.GetPathRoot(path + "\\"));
-
-            used = dinfo.AvailableFreeSpace;
-            total = dinfo.TotalSize;
-            free = dinfo.TotalFreeSpace;
-            return Trace(nameof(GetDiskFreeSpace), null, info, DokanResult.Success, "out " + free.ToString(),
-                "out " + total.ToString(), "out " + used.ToString());
+            free = 0;
+            total = 0;
+            used = 0;
+            return NtStatus.NotImplemented;
         }
 
         public NtStatus GetVolumeInformation(out string volumeLabel, out FileSystemFeatures features,
@@ -565,6 +712,7 @@ namespace DokanNetMirror
         public NtStatus GetFileSecurity(string fileName, out FileSystemSecurity security, AccessControlSections sections,
             DokanFileInfo info)
         {
+            OnFileRead(fileName);
             try
             {
                 security = info.IsDirectory
@@ -582,6 +730,7 @@ namespace DokanNetMirror
         public NtStatus SetFileSecurity(string fileName, FileSystemSecurity security, AccessControlSections sections,
             DokanFileInfo info)
         {
+            OnFileChanged(fileName);
             try
             {
                 if (info.IsDirectory)
@@ -607,6 +756,8 @@ namespace DokanNetMirror
 
         public NtStatus Unmounted(DokanFileInfo info)
         {
+            repositoryStatus.Dispose();
+            repositoryStatus = null;
             return Trace(nameof(Unmounted), null, info, DokanResult.Success);
         }
 
@@ -627,6 +778,19 @@ namespace DokanNetMirror
 
         public IList<FileInformation> FindFilesHelper(string fileName, string searchPattern)
         {
+            OnFileRead(fileName);
+            if (fileName == "\\")
+            {
+                lock (_lock)
+                {
+                    return projects.Where(x => MatchesPattern(x.Key, searchPattern)).Select(x => new FileInformation()
+                    {
+                        Attributes = FileAttributes.Directory,
+                        FileName = x.Key
+                    }).ToList();
+                }
+            }
+
             IList<FileInformation> files = new DirectoryInfo(GetPath(fileName))
                 .GetFileSystemInfos(searchPattern)
                 .Select(finfo => new FileInformation
@@ -642,6 +806,13 @@ namespace DokanNetMirror
             return files;
         }
 
+        private bool MatchesPattern(string key, string searchPattern)
+        {
+            if (searchPattern == "*") return true;
+            if (searchPattern.IndexOf('>') == -1 && searchPattern.IndexOf('*') == -1) return key.Equals(searchPattern, StringComparison.OrdinalIgnoreCase);
+            return Regex.IsMatch(key, "^" + Regex.Escape(searchPattern).Replace(@"\*", ".*").Replace(@">", ".") + "$", RegexOptions.IgnoreCase);
+        }
+
         public NtStatus FindFilesWithPattern(string fileName, string searchPattern, out IList<FileInformation> files,
             DokanFileInfo info)
         {
@@ -649,7 +820,7 @@ namespace DokanNetMirror
 
             return Trace(nameof(FindFilesWithPattern), fileName, info, DokanResult.Success);
         }
-
+        
         #endregion Implementation of IDokanOperations
     }
 }
