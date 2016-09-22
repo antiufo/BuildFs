@@ -51,7 +51,9 @@ namespace BuildFs
             string keyHash;
             using (var sha1 = new SHA1Cng())
             {
-                keyHash = Convert.ToBase64String(sha1.ComputeHash(Encoding.UTF8.GetBytes(proj + "\n" + key)))
+                var arr = Encoding.UTF8.GetBytes(proj + "\n" + key);
+                var hash = sha1.ComputeHash(arr);
+                keyHash = Convert.ToBase64String(hash)
                     .Replace("/", "-")
                     .Replace("+", "_")
                     .Replace("=", string.Empty);
@@ -87,22 +89,35 @@ namespace BuildFs
                 var proj = GetProjectByNameHasLock(v);
                 if (changes.Inputs != null)
                 {
-                    foreach (var item in changes.Inputs)
+                    foreach (var old in changes.Inputs)
                     {
-                        var current = CaptureItemStatus(GetPathAware(item.Path)) ?? new ItemStatus();
-                        if (current.Attributes != item.Attributes)
+                        var current = CaptureItemStatus(GetPathAware(old.Path)) ?? new ItemStatus();
+                        if (current.Attributes == (FileAttributes)0 && old.Attributes != (FileAttributes)0)
                         {
-                            Console.WriteLine("Changed attributes: " + item.Path);
+                            Console.WriteLine("Changed, no longer exists: " + old.Path);
                             return false;
                         }
-                        if (current.LastWriteTime != item.LastWriteTime)
+                        if (current.Attributes != (FileAttributes)0 && old.Attributes == (FileAttributes)0)
                         {
-                            Console.WriteLine("Changed last write time: " + item.Path);
+                            Console.WriteLine("Changed, new file exists: " + old.Path);
                             return false;
                         }
-                        if (current.Size != item.Size)
+                        if (current.Attributes != old.Attributes)
                         {
-                            Console.WriteLine("Changed size: " + item.Path);
+                            Console.WriteLine("Changed attributes: " + old.Path);
+                            Console.WriteLine(old.Attributes + " -> " + current.Attributes);
+                            return false;
+                        }
+                        if (current.LastWriteTime != old.LastWriteTime)
+                        {
+                            Console.WriteLine("Changed last write time: " + old.Path);
+                            Console.WriteLine(old.LastWriteTime + " -> " + current.LastWriteTime);
+                            return false;
+                        }
+                        if (current.Size != old.Size)
+                        {
+                            Console.WriteLine("Changed size: " + old.Path);
+                            Console.WriteLine(old.Size + " -> " + current.Size);
                             return false;
                         }
 
@@ -144,12 +159,16 @@ namespace BuildFs
                     {
                         outputs.Add(item.Key);
                     }
-                    else if(Path.GetFileName(item.Key) != "makefile") // TODO temp
+                    else 
                     {
-                        var k = pair.Before;
-                        if (k == null) k = new ItemStatus();
-                        k.Path = item.Key;
-                        inputs.Add(k);
+                        var m = Path.GetFileName(item.Key);
+                        if (m != "makefile" && m != "makefile-common")
+                        {
+                            var k = pair.Before;
+                            if (k == null) k = new ItemStatus();
+                            k.Path = item.Key;
+                            inputs.Add(k);
+                        }
                     }
                 }
                 return new ExecutionSummary() { Inputs = inputs, Outputs = outputs };
@@ -203,18 +222,19 @@ namespace BuildFs
             {
                 var proj = GetProjectFromPathHasLock(fileName);
                 if (proj == null) return null;
-                return proj.Path + fileName.Substring(1 + proj.Name.Length);
+                return proj.Path + fileName.Substring(1 + proj.Name.Length).Replace('/', '\\');
             }
         }
 
         private Project GetProjectFromPathHasLock(string fileName)
         {
             if (fileName == "\\") return null;
-            var path = fileName.SplitFast('\\');
-
-            var proj = projects.FirstOrDefault(x => x.Key == path[1]);
-            if (proj.Value == null) return null;
-            return proj.Value;
+            var idx = fileName.IndexOf('\\', 1);
+            if (idx == -1) idx = fileName.Length;
+            var name = fileName.SubstringCached(1, idx - 1);
+            Project p;
+            projects.TryGetValue(name, out p);
+            return p;
         }
 
         private Project GetProjectByNameHasLock(string projectName)
@@ -286,14 +306,14 @@ namespace BuildFs
                 FileAccess.WriteAttributes |
                 FileAccess.WriteData |
                 FileAccess.WriteExtendedAttributes;
-            
+
             if (
                 fileName.IndexOf('*') != -1 ||
                 fileName.IndexOf('?') != -1 ||
                 fileName.IndexOf('>') != -1 ||
                 fileName.IndexOf('<') != -1
-                ) return DokanResult.PathNotFound;
-
+                ) return NtStatus.ObjectNameInvalid;
+                
             OnFileRead(fileName);
             if ((access & modifies) != 0)
             {
@@ -337,7 +357,7 @@ namespace BuildFs
                                     attributes, DokanResult.PathNotFound);
                             }
 
-                            new DirectoryInfo(filePath).EnumerateFileSystemInfos().Any();
+                            //new DirectoryInfo(filePath).EnumerateFileSystemInfos().Any();
                             // you can't list the directory
                             break;
 
@@ -374,14 +394,9 @@ namespace BuildFs
                 var readWriteAttributes = (access & DataAccess) == 0;
                 var readAccess = (access & DataWriteAccess) == 0;
 
-                try
-                {
-                    pathExists = (Directory.Exists(filePath) || File.Exists(filePath));
-                    pathIsDirectory = pathExists && File.GetAttributes(filePath).HasFlag(FileAttributes.Directory);
-                }
-                catch (IOException)
-                {
-                }
+                var attr = GetFileAttributes(filePath);
+                pathExists = attr != FileAttributes_NotFound;
+                pathIsDirectory = (attr & (uint)FileAttributes.Directory) != 0;
 
                 switch (mode)
                 {
@@ -428,6 +443,7 @@ namespace BuildFs
 
                 try
                 {
+                    if (readAccess) share |= FileShare.Read;
                     info.Context = new FileStream(filePath, mode,
                         readAccess ? System.IO.FileAccess.Read : System.IO.FileAccess.ReadWrite, share, 4096, options);
 
@@ -464,6 +480,11 @@ namespace BuildFs
             }
             return Trace(nameof(CreateFile), fileName, info, access, share, mode, options, attributes,
                 result);
+        }
+
+        static bool IsDirectory(uint attrs)
+        {
+            return (attrs & (uint)FileAttributes.Directory) != 0;
         }
 
         public void Cleanup(string fileName, DokanFileInfo info)
@@ -509,7 +530,7 @@ namespace BuildFs
             OnFileRead(fileName);
             if (info.Context == null) // memory mapped read
             {
-                using (var stream = new FileStream(GetPath(fileName), FileMode.Open, System.IO.FileAccess.Read))
+                using (var stream = new FileStream(GetPath(fileName), FileMode.Open, System.IO.FileAccess.Read, FileShare.Read | FileShare.Delete))
                 {
                     stream.Position = offset;
                     bytesRead = stream.Read(buffer, 0, buffer.Length);
@@ -602,7 +623,7 @@ namespace BuildFs
                 var fi = new FileInfo(physicalPath);
                 return new ItemStatus()
                 {
-                    Attributes = fi.Attributes | FileAttributes.Archive,
+                    Attributes = (fi.Attributes | FileAttributes.Archive) & ~FileAttributes.Normal,
                     LastWriteTime = fi.LastWriteTimeUtc,
                     Size = fi.Length
                 };
@@ -610,7 +631,7 @@ namespace BuildFs
             else if (Directory.Exists(physicalPath))
             {
                 var di = new DirectoryInfo(physicalPath);
-                return new ItemStatus() { Attributes = di.Attributes };
+                return new ItemStatus() { Attributes = di.Attributes & ~FileAttributes.Normal };
             }
             return null;
         }
@@ -620,7 +641,7 @@ namespace BuildFs
             OnFileChanged(fileName);
             if (info.Context == null)
             {
-                using (var stream = new FileStream(GetPath(fileName), FileMode.Open, System.IO.FileAccess.Write))
+                using (var stream = new FileStream(GetPath(fileName), FileMode.Open, System.IO.FileAccess.Write, FileShare.Delete))
                 {
                     stream.Position = offset;
                     stream.Write(buffer, 0, buffer.Length);
@@ -668,9 +689,13 @@ namespace BuildFs
             }
             // may be called with info.Context == null, but usually it isn't
             var filePath = GetPath(fileName);
-            FileSystemInfo finfo = new FileInfo(filePath);
-            if (!finfo.Exists)
-                finfo = new DirectoryInfo(filePath);
+            var attr = GetFileAttributes(filePath);
+            if (attr == FileAttributes_NotFound)
+            {
+                fileInfo = default(FileInformation);
+                return DokanResult.FileNotFound;
+            }
+            var finfo = IsDirectory(attr) ? new DirectoryInfo(filePath) : (FileSystemInfo)new FileInfo(filePath);
 
             fileInfo = new FileInformation
             {
@@ -989,8 +1014,29 @@ namespace BuildFs
                     }).ToList();
                 }
             }
+            var k = GetPathAware(fileName);
+            if (searchPattern.IndexOf('*') == -1 && searchPattern.IndexOf('?') == -1)
+            {
+                var path = Path.Combine(k, searchPattern);
+                var attr = GetFileAttributes(path);
+                if (attr == FileAttributes_NotFound) return Array.Empty<FileInformation>();
+                FileSystemInfo finfo;
+                if (IsDirectory(attr)) finfo = new DirectoryInfo(path);
+                else finfo = new FileInfo(path);
+                return new FileInformation[] {
+                    new FileInformation
+                    {
+                        Attributes = finfo.Attributes,
+                        CreationTime = finfo.CreationTime,
+                        LastAccessTime = finfo.LastAccessTime,
+                        LastWriteTime = finfo.LastWriteTime,
+                        Length = (finfo as FileInfo)?.Length ?? 0,
+                        FileName = finfo.Name
+                    }
+                };
+            }
 
-            IList<FileInformation> files = new DirectoryInfo(GetPath(fileName))
+            IList<FileInformation> files = new DirectoryInfo(k)
                 .GetFileSystemInfos(searchPattern)
                 .Select(finfo => new FileInformation
                 {
@@ -1004,6 +1050,21 @@ namespace BuildFs
 
             return files;
         }
+        /*internal static bool InternalExists(string path)
+        {
+            Win32Native.WIN32_FILE_ATTRIBUTE_DATA wIN32_FILE_ATTRIBUTE_DATA = default(Win32Native.WIN32_FILE_ATTRIBUTE_DATA);
+            return File.FillAttributeInfo(path, ref wIN32_FILE_ATTRIBUTE_DATA, false, true) == 0 && wIN32_FILE_ATTRIBUTE_DATA.fileAttributes != -1 && (wIN32_FILE_ATTRIBUTE_DATA.fileAttributes & 16) == 0;
+        }*/
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+        static extern uint GetFileAttributes(string lpFileName);
+
+        private static bool FileOrFolderExists(string path)
+        {
+            return GetFileAttributes(path) != FileAttributes_NotFound;
+        }
+
+        private const uint FileAttributes_NotFound = 0xFFFFFFFF;
 
         private bool MatchesPattern(string key, string searchPattern)
         {
