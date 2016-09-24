@@ -80,7 +80,11 @@
     <Reference Include="System.Xml" />
   </ItemGroup>
   <ItemGroup>
+    <Compile Include="CacheFs.cs" />
     <Compile Include="BuildFsFileSystem.cs" />
+    <Compile Include="Entry.cs" />
+    <Compile Include="EntryStream.cs" />
+    <Compile Include="NativeMethods.cs" />
     <Compile Include="Program.cs" />
     <Compile Include="Project.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />

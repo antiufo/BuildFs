@@ -53,7 +53,7 @@ namespace BuildFs
         {
             lock (_lock)
             {
-                return "D:\\CacheFs" + fileName;
+                return "C:\\CacheFs" + fileName;
             }
         }
 
@@ -86,6 +86,14 @@ namespace BuildFs
 #endif
 
             return result;
+        }
+
+        internal void ReleaseOneHandle(Entry ent)
+        {
+            lock (InMemory)
+            {
+                ent.OpenHandles--;
+            }
         }
 
         #region Implementation of IDokanOperations
@@ -141,11 +149,11 @@ namespace BuildFs
                     switch (mode)
                     {
                         case FileMode.Open:
-                            if (!Directory.Exists(filePath))
+                            if (!Directory_Exists(filePath))
                             {
                                 try
                                 {
-                                    if (!File.GetAttributes(filePath).HasFlag(FileAttributes.Directory))
+                                    if (!File_GetAttributes(filePath).HasFlag(FileAttributes.Directory))
                                         return Trace(nameof(CreateFile), fileName, info, access, share, mode, options,
                                             attributes, NtStatus.NotADirectory);
                                 }
@@ -163,22 +171,17 @@ namespace BuildFs
                             break;
 
                         case FileMode.CreateNew:
-                            if (Directory.Exists(filePath))
+                            if (Directory_Exists(filePath))
                                 return Trace(nameof(CreateFile), fileName, info, access, share, mode, options,
                                     attributes, DokanResult.FileExists);
 
-                            try
-                            {
-                                File.GetAttributes(filePath).HasFlag(FileAttributes.Directory);
+                            var m = GetFileAttributes(filePath);
+                            if(m != FileAttributes_NotFound && (m & (uint)FileAttributes.Directory) != 0)
                                 return Trace(nameof(CreateFile), fileName, info, access, share, mode, options,
-                                    attributes, DokanResult.AlreadyExists);
-                            }
-                            catch (IOException)
-                            {
-                            }
+                                attributes, DokanResult.AlreadyExists);
 
                             OnFileChanged(fileName);
-                            Directory.CreateDirectory(GetPath(fileName));
+                            Directory_CreateDirectoryAssumeNotExisting(GetPath(fileName));
                             break;
                     }
                 }
@@ -246,7 +249,7 @@ namespace BuildFs
                 try
                 {
                     if (readAccess) share |= FileShare.Read;
-                    info.Context = new FileStream(filePath, mode,
+                    info.Context = FileStream_Open(filePath, mode,
                         readAccess ? System.IO.FileAccess.Read : System.IO.FileAccess.ReadWrite, share, 4096, options);
 
                     if (pathExists && (mode == FileMode.OpenOrCreate
@@ -255,7 +258,7 @@ namespace BuildFs
 
                     if (mode == FileMode.CreateNew || mode == FileMode.Create) //Files are always created as Archive
                         attributes |= FileAttributes.Archive;
-                    File.SetAttributes(filePath, attributes);
+                    File_SetAttributes(filePath, attributes);
                 }
                 catch (UnauthorizedAccessException) // don't have access rights
                 {
@@ -284,6 +287,29 @@ namespace BuildFs
                 result);
         }
 
+        private void Directory_CreateDirectoryAssumeNotExisting(string v)
+        {
+            var parent = Path.GetDirectoryName(v);
+            lock (InMemory)
+            {
+                var entry = TryGetEntryHasLock(parent);
+                if (entry != null)
+                {
+                    entry.Items.Add(Path.GetFileName(v));
+                    var subentry = new Entry();
+                    subentry.Attributes = FileAttributes.Directory;
+                    subentry.LastWriteTimeUtc = DateTime.UtcNow;
+                    subentry.Items = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    InMemory[v] = subentry;
+                }
+                else
+                {
+                    OnPhysicalChange(v);
+                    Directory.CreateDirectory(v);
+                }
+            }
+        }
+
         static bool IsDirectory(uint attrs)
         {
             return (attrs & (uint)FileAttributes.Directory) != 0;
@@ -298,20 +324,56 @@ namespace BuildFs
 
             (info.Context as Stream)?.Dispose();
             info.Context = null;
-
+            NtStatus result = NtStatus.Success;
             if (info.DeleteOnClose)
             {
                 OnFileChanged(fileName);
                 if (info.IsDirectory)
                 {
-                    Directory.Delete(GetPath(fileName));
+                    result = Directory_TryDelete(GetPath(fileName));
                 }
                 else
                 {
-                    File.Delete(GetPath(fileName));
+                    File_Delete(GetPath(fileName));
                 }
             }
-            Trace(nameof(Cleanup), fileName, info, DokanResult.Success);
+            Trace(nameof(Cleanup), fileName, info, result);
+        }
+
+        private NtStatus Directory_TryDelete(string physicalPath)
+        {
+            NtStatus result = NtStatus.DirectoryNotEmpty;
+            lock (InMemory)
+            {
+                var entry = TryGetEntryHasLock(physicalPath);
+                if (entry != null)
+                {
+                    if (entry.Attributes == default(FileAttributes) || entry.Items.Count == 0)
+                    {
+                        entry.Attributes = default(FileAttributes);
+                        entry.Items = null;
+                        result = NtStatus.Success;
+                    }
+                }
+                else
+                {
+                    if (!Directory.Exists(physicalPath))
+                    {
+                        result = NtStatus.Success;
+                    }
+                    else if(!Directory.EnumerateFiles(physicalPath).Any())
+                    {
+                        Directory.Delete(physicalPath);
+                        result = NtStatus.Success;
+                    }
+                }
+                var parent = TryGetEntryHasLock(Path.GetDirectoryName(physicalPath));
+                if (parent != null)
+                {
+                    parent.Items.Remove(Path.GetFileName(physicalPath));
+                }
+            }
+            return result;
         }
 
         public void CloseFile(string fileName, DokanFileInfo info)
@@ -327,12 +389,30 @@ namespace BuildFs
             // could recreate cleanup code here but this is not called sometimes
         }
 
+
+        private Dictionary<string, Entry> InMemory = new Dictionary<string, Entry>(StringComparer.OrdinalIgnoreCase);
+
+        private uint GetFileAttributes(string physicalPath)
+        {
+            lock (InMemory)
+            {
+                var entry = TryGetEntryHasLock(physicalPath);
+                if (entry != null) 
+                {
+                    if (entry.Attributes == default(FileAttributes)) return FileAttributes_NotFound;
+                    return (uint)entry.Attributes;
+                }
+                return NativeMethods.GetFileAttributes(physicalPath);
+            }
+        }
+
+
         public NtStatus ReadFile(string fileName, byte[] buffer, out int bytesRead, long offset, DokanFileInfo info)
         {
             OnFileRead(fileName);
             if (info.Context == null) // memory mapped read
             {
-                using (var stream = new FileStream(GetPath(fileName), FileMode.Open, System.IO.FileAccess.Read, FileShare.Read | FileShare.Delete))
+                using (var stream = FileStream_Open(GetPath(fileName), FileMode.Open, System.IO.FileAccess.Read, FileShare.Read | FileShare.Delete))
                 {
                     stream.Position = offset;
                     bytesRead = stream.Read(buffer, 0, buffer.Length);
@@ -353,16 +433,7 @@ namespace BuildFs
 
         private void OnFileChanged(string fileName)
         {
-            Console.WriteLine("Change: " + fileName);
-        }
-
-        private byte[] CaptureHash(string fileName)
-        {
-            using (var stream = File.Open(GetPathAware(fileName), FileMode.Open, System.IO.FileAccess.Read, FileShare.Delete | FileShare.Read))
-            using (var sha1 = new SHA1Cng())
-            {
-                return sha1.ComputeHash(stream);
-            }
+            //Console.WriteLine("Change: " + fileName);
         }
 
         private void OnFileRead(string fileName)
@@ -380,7 +451,7 @@ namespace BuildFs
             OnFileChanged(fileName);
             if (info.Context == null)
             {
-                using (var stream = new FileStream(GetPath(fileName), FileMode.Open, System.IO.FileAccess.Write, FileShare.Delete))
+                using (var stream = FileStream_Open(GetPath(fileName), FileMode.Open, System.IO.FileAccess.Write, FileShare.Delete))
                 {
                     stream.Position = offset;
                     stream.Write(buffer, 0, buffer.Length);
@@ -399,6 +470,63 @@ namespace BuildFs
             }
             return Trace(nameof(WriteFile), fileName, info, DokanResult.Success, "out " + bytesWritten.ToString(),
                 offset.ToString(CultureInfo.InvariantCulture));
+        }
+
+        private Stream FileStream_Open(string path, FileMode mode, System.IO.FileAccess fileAccess, FileShare fileShare, int bufferSize = 4096, FileOptions options = FileOptions.None)
+        {
+            lock (InMemory)
+            {
+                var firstUse = false;
+                var entry = TryGetEntryHasLock(path);
+                if (entry == null || entry.Attributes == default(FileAttributes))
+                {
+                    if (fileAccess == System.IO.FileAccess.Read && mode == FileMode.CreateNew) fileAccess = System.IO.FileAccess.ReadWrite;
+                    if (fileAccess == System.IO.FileAccess.Read) return new FileStream(path, mode, fileAccess, fileShare, bufferSize, options);
+                    firstUse = true;
+                    entry = new Entry();
+                    entry.Attributes = FileAttributes.Archive;
+                    entry.LastWriteTimeUtc = DateTime.UtcNow;
+                    entry.Contents = new MemoryStream();
+                    InMemory[path] = entry;
+
+                    var parentDirectory = Path.GetDirectoryName(path);
+                    var parent = TryGetEntryHasLock(parentDirectory);
+                    if (parent != null)
+                    {
+                        parent.Items.Add(Path.GetFileName(path));
+                    }
+                    else
+                    {
+                        if (!File.Exists(path))
+                        {
+                            parent = new Entry();
+                            parent.Attributes = (FileAttributes)GetFileAttributes(parentDirectory);
+                            parent.Items = new HashSet<string>(Directory.EnumerateFileSystemEntries(parentDirectory).Select(x => Path.GetFileName(x)), StringComparer.OrdinalIgnoreCase);
+                            parent.Items.Add(Path.GetFileName(path));
+                            InMemory[parentDirectory] = parent;
+                        }
+                    }
+                    
+                }
+
+                if (mode == FileMode.Truncate || mode == FileMode.Create || mode == FileMode.CreateNew) entry.Contents.SetLength(0);
+                var stream = new EntryStream(entry, fileAccess);
+                if (firstUse && (mode == FileMode.Open || mode == FileMode.OpenOrCreate || mode == FileMode.Append))
+                {
+                    if (File.Exists(path))
+                    {
+                        Console.WriteLine("LOAD: " + path);
+                        using (var original = File.Open(path, FileMode.Open, System.IO.FileAccess.Read, FileShare.Delete | FileShare.ReadWrite))
+                        {
+                            original.CopyTo(entry.Contents);
+                        }
+                    }
+                }
+                if (mode == FileMode.Append) stream.Position = entry.Length;
+                entry.FileSystem = this;
+                entry.OpenHandles++;
+                return stream;
+            }
         }
 
         public NtStatus FlushFileBuffers(string fileName, DokanFileInfo info)
@@ -434,18 +562,42 @@ namespace BuildFs
                 fileInfo = default(FileInformation);
                 return DokanResult.FileNotFound;
             }
-            var finfo = IsDirectory(attr) ? new DirectoryInfo(filePath) : (FileSystemInfo)new FileInfo(filePath);
-
-            fileInfo = new FileInformation
-            {
-                FileName = fileName,
-                Attributes = finfo.Attributes,
-                CreationTime = finfo.CreationTime,
-                LastAccessTime = finfo.LastAccessTime,
-                LastWriteTime = finfo.LastWriteTime,
-                Length = (finfo as FileInfo)?.Length ?? 0,
-            };
+            fileInfo = GetFileInformation(fileName, attr);
             return Trace(nameof(GetFileInformation), fileName, info, DokanResult.Success);
+        }
+
+        private FileInformation GetFileInformation(string virtualPath, uint attr)
+        {
+            var physicalPath = GetPath(virtualPath);
+            lock (InMemory)
+            {
+                var entry = TryGetEntryHasLock(physicalPath);
+                if (entry != null)
+                {
+                    return new FileInformation
+                    {
+                        FileName = Path.GetFileName(virtualPath),
+                        Attributes = entry.Attributes,
+                        LastWriteTime = entry.LastWriteTimeUtc,
+                        Length = IsDirectory((uint)entry.Attributes) ? 0 : entry.Length
+                    };
+                }
+                else
+                {
+                    var finfo = IsDirectory(attr) ? new DirectoryInfo(physicalPath) : (FileSystemInfo)new FileInfo(physicalPath);
+
+                    return new FileInformation
+                    {
+                        FileName = Path.GetFileName(virtualPath),
+                        Attributes = finfo.Attributes,
+                        CreationTime = finfo.CreationTime,
+                        LastAccessTime = finfo.LastAccessTime,
+                        LastWriteTime = finfo.LastWriteTime,
+                        Length = (finfo as FileInfo)?.Length ?? 0,
+                    };
+                }
+                
+            }
         }
 
         public NtStatus FindFiles(string fileName, out IList<FileInformation> files, DokanFileInfo info)
@@ -462,7 +614,7 @@ namespace BuildFs
             OnFileChanged(fileName);
             try
             {
-                File.SetAttributes(GetPath(fileName), attributes);
+                File_SetAttributes(GetPath(fileName), attributes);
                 return Trace(nameof(SetFileAttributes), fileName, info, DokanResult.Success, attributes.ToString());
             }
             catch (UnauthorizedAccessException)
@@ -479,6 +631,57 @@ namespace BuildFs
             }
         }
 
+        private Entry TryGetEntryHasLock(string path)
+        {
+            Entry entry;
+            path = NormalizePath(path);
+            InMemory.TryGetValue(path, out entry);
+            return entry;
+        }
+
+        private void SetEntryHasLock(string path, Entry entry)
+        {
+            InMemory[NormalizePath(path)] = entry;
+        }
+
+        private string NormalizePath(string path)
+        {
+            if (path[0] == '\\') throw new ArgumentException();
+            path = path.Replace('/', '\\');
+            
+            if (path.Contains("\\\\") || path.Contains(@"\.\") || path.Contains(@"\..\"))
+            {
+                path = Path.GetFullPath(path);
+            }
+            
+            if (path.EndsWith("\\")) path = path.Substring(0, path.Length - 1);
+            return path;
+        }
+
+        private void File_SetAttributes(string v, FileAttributes attributes)
+        {
+            lock (InMemory)
+            {
+                var entry = TryGetEntryHasLock(v);
+                if (entry != null)
+                {
+                    if (attributes == default(FileAttributes)) attributes = FileAttributes.Normal;
+                    entry.Attributes = attributes;
+                }
+                else
+                {
+                    OnPhysicalChange(v); ;
+                    File.SetAttributes(v, attributes);
+                }
+            }
+            
+        }
+
+        private void OnPhysicalChange(string v)
+        {
+            Console.WriteLine("Physical change: " + v);
+        }
+
         public NtStatus SetFileTime(string fileName, DateTime? creationTime, DateTime? lastAccessTime,
             DateTime? lastWriteTime, DokanFileInfo info)
         {
@@ -487,13 +690,13 @@ namespace BuildFs
             {
                 var filePath = GetPath(fileName);
                 if (creationTime.HasValue)
-                    File.SetCreationTime(filePath, creationTime.Value);
+                    File_SetCreationTime(filePath, creationTime.Value);
 
                 if (lastAccessTime.HasValue)
-                    File.SetLastAccessTime(filePath, lastAccessTime.Value);
+                    File_SetLastAccessTime(filePath, lastAccessTime.Value);
 
                 if (lastWriteTime.HasValue)
-                    File.SetLastWriteTime(filePath, lastWriteTime.Value);
+                    File_SetLastWriteTime(filePath, lastWriteTime.Value);
 
                 return Trace(nameof(SetFileTime), fileName, info, DokanResult.Success, creationTime, lastAccessTime,
                     lastWriteTime);
@@ -510,34 +713,65 @@ namespace BuildFs
             }
         }
 
+        private void File_SetLastWriteTime(string filePath, DateTime value)
+        {
+            lock (InMemory)
+            {
+                var entry = TryGetEntryHasLock(filePath);
+                if (entry != null)
+                {
+                    entry.LastWriteTimeUtc = value;
+                }
+                else
+                {
+                    File.SetLastWriteTimeUtc(filePath, value);
+                }
+            }
+        }
+
+        private void File_SetLastAccessTime(string filePath, DateTime value)
+        {
+            //throw new NotImplementedException();
+        }
+
+        private void File_SetCreationTime(string filePath, DateTime value)
+        {
+            throw new NotImplementedException();
+        }
+
         public NtStatus DeleteFile(string fileName, DokanFileInfo info)
         {
             OnFileChanged(fileName);
             var filePath = GetPath(fileName);
 
-            if (Directory.Exists(filePath))
+            if (Directory_Exists(filePath))
                 return Trace(nameof(DeleteFile), fileName, info, DokanResult.AccessDenied);
 
-            if (!File.Exists(filePath))
+            if (!File_Exists(filePath))
                 return Trace(nameof(DeleteFile), fileName, info, DokanResult.FileNotFound);
 
-            if (File.GetAttributes(filePath).HasFlag(FileAttributes.Directory))
+            if (File_GetAttributes(filePath).HasFlag(FileAttributes.Directory))
                 return Trace(nameof(DeleteFile), fileName, info, DokanResult.AccessDenied);
 
             return Trace(nameof(DeleteFile), fileName, info, DokanResult.Success);
             // we just check here if we could delete the file - the true deletion is in Cleanup
         }
 
+        private FileAttributes File_GetAttributes(string filePath)
+        {
+            var m = GetFileAttributes(filePath);
+            if (m == FileAttributes_NotFound) throw new FileNotFoundException();
+            return (FileAttributes)m;
+        }
+
         public NtStatus DeleteDirectory(string fileName, DokanFileInfo info)
         {
             OnFileChanged(fileName);
-            return Trace(nameof(DeleteDirectory), fileName, info,
-                Directory.EnumerateFileSystemEntries(GetPath(fileName)).Any()
-                    ? DokanResult.DirectoryNotEmpty
-                    : DokanResult.Success);
-            // if dir is not empty it can't be deleted
+            var result = Directory_TryDelete(GetPath(fileName));
+            return Trace(nameof(DeleteDirectory), fileName, info, result);
         }
 
+        
         public NtStatus MoveFile(string oldName, string newName, bool replace, DokanFileInfo info)
         {
             OnFileRead(oldName);
@@ -550,7 +784,7 @@ namespace BuildFs
             (info.Context as Stream)?.Dispose();
             info.Context = null;
 
-            var exist = info.IsDirectory ? Directory.Exists(newpath) : File.Exists(newpath);
+            var exist = info.IsDirectory ? Directory_Exists(newpath) : File_Exists(newpath);
 
             try
             {
@@ -559,9 +793,9 @@ namespace BuildFs
                 {
                     info.Context = null;
                     if (info.IsDirectory)
-                        Directory.Move(oldpath, newpath);
+                        Directory_Move(oldpath, newpath);
                     else
-                        File.Move(oldpath, newpath);
+                        File_Move(oldpath, newpath);
                     return Trace(nameof(MoveFile), oldName, info, DokanResult.Success, newName,
                         replace.ToString(CultureInfo.InvariantCulture));
                 }
@@ -573,8 +807,8 @@ namespace BuildFs
                         return Trace(nameof(MoveFile), oldName, info, DokanResult.AccessDenied, newName,
                             replace.ToString(CultureInfo.InvariantCulture));
 
-                    File.Delete(newpath);
-                    File.Move(oldpath, newpath);
+                    File_Delete(newpath);
+                    File_Move(oldpath, newpath);
                     return Trace(nameof(MoveFile), oldName, info, DokanResult.Success, newName,
                         replace.ToString(CultureInfo.InvariantCulture));
                 }
@@ -586,6 +820,142 @@ namespace BuildFs
             }
             return Trace(nameof(MoveFile), oldName, info, DokanResult.FileExists, newName,
                 replace.ToString(CultureInfo.InvariantCulture));
+        }
+
+
+        private void File_Move(string oldpath, string newpath)
+        {
+            FileOrDirectory_Move(oldpath, newpath, false);
+        }
+        private void FileOrDirectory_Move(string oldpath, string newpath, bool isDirectory)
+        {
+            lock (InMemory)
+            {
+                var entry = TryGetEntryHasLock(oldpath);
+                var replaced = TryGetEntryHasLock(newpath);
+                if (replaced != null && replaced.Attributes != default(FileAttributes))
+                {
+                    throw new InvalidOperationException();
+                }
+                if (entry != null)
+                {
+                    if (entry.Attributes == default(FileAttributes)) throw new FileNotFoundException();
+                    if (!isDirectory)
+                    {
+                        InMemory[newpath] = entry;
+                        InMemory[oldpath] = new Entry() { };
+                    }
+                }
+                else
+                {
+                    OnPhysicalChange(oldpath);
+                    OnPhysicalChange(newpath);
+                    if (replaced != null)
+                    {
+                        if (isDirectory)
+                        {
+                            try
+                            {
+                                Directory.Delete(newpath);
+                            }
+                            catch (Exception)
+                            {
+                                File.Delete(newpath);
+                            }
+                        }
+                        else
+                        {
+                            try
+                            {
+                                File.Delete(newpath);
+                            }
+                            catch (Exception)
+                            {
+                                Directory.Delete(newpath);
+                            }
+                        }
+                        InMemory[newpath] = null;
+                    }
+
+                    if (isDirectory)
+                    {
+                        Directory.Move(oldpath, newpath);
+                    }
+                    else
+                    {
+                        File.Move(oldpath, newpath);
+                        InMemory.Remove(newpath);
+                    }
+                }
+                var parentDirectory1 = TryGetEntryHasLock( Path.GetDirectoryName(oldpath));
+                var parentDirectory2 = TryGetEntryHasLock( Path.GetDirectoryName(newpath));
+
+                if (parentDirectory1 != null) parentDirectory1.Items.Remove(Path.GetFileName(oldpath));
+                if (parentDirectory2 != null) parentDirectory2.Items.Add(Path.GetFileName(newpath));
+
+                if (isDirectory)
+                {
+                    foreach (var item in InMemory.ToList())
+                    {
+                        var key = item.Key;
+                        if (
+                            key.Equals(oldpath, StringComparison.OrdinalIgnoreCase) ||
+                            (key.StartsWith(oldpath, StringComparison.OrdinalIgnoreCase) && key.Length > oldpath.Length && key[oldpath.Length] == '\\'))
+                        {
+                            InMemory.Remove(key);
+                            InMemory[newpath + key.Substring(oldpath.Length)] = item.Value;
+                        }
+                    }
+                }
+
+            }
+        }
+
+        private void File_Delete(string path)
+        {
+            lock (InMemory)
+            {
+                var entry = TryGetEntryHasLock(path);
+                var parentPath = Path.GetDirectoryName(path);
+                var parent = TryGetEntryHasLock(parentPath);
+
+                if (entry != null)
+                {
+                    entry.Attributes = default(FileAttributes);
+                    entry.Contents?.Dispose();
+                    entry.Contents = null;
+                    if (!File.Exists(path))
+                    {
+                        InMemory.Remove(path);
+                    }
+                }
+                else
+                {
+                    OnPhysicalChange(path);
+                    File.Delete(path);
+                }
+
+                if (parent != null)
+                {
+                    parent.Items.Remove(Path.GetFileName(path));
+                }
+            }
+        }
+
+        private void Directory_Move(string oldpath, string newpath)
+        {
+            FileOrDirectory_Move(oldpath, newpath, true);
+        }
+
+        private bool File_Exists(string path)
+        {
+            var m = GetFileAttributes(path);
+            return m != FileAttributes_NotFound && ((m & (uint)FileAttributes.Directory) == 0);
+        }
+        private bool Directory_Exists(string path)
+        {
+            var m = GetFileAttributes(path);
+            return m != FileAttributes_NotFound && ((m & (uint)FileAttributes.Directory) != 0);
         }
 
         public NtStatus SetEndOfFile(string fileName, long length, DokanFileInfo info)
@@ -663,8 +1033,8 @@ namespace BuildFs
         public NtStatus GetVolumeInformation(out string volumeLabel, out FileSystemFeatures features,
             out string fileSystemName, DokanFileInfo info)
         {
-            volumeLabel = "DOKAN";
-            fileSystemName = "NTFS";
+            volumeLabel = "CacheFs";
+            fileSystemName = "CacheFs";
 
             features = FileSystemFeatures.CasePreservedNames | FileSystemFeatures.CaseSensitiveSearch |
                        FileSystemFeatures.PersistentAcls | FileSystemFeatures.SupportsRemoteStorage |
@@ -677,12 +1047,15 @@ namespace BuildFs
         public NtStatus GetFileSecurity(string fileName, out FileSystemSecurity security, AccessControlSections sections,
             DokanFileInfo info)
         {
+            security = null;
+            return NtStatus.NotImplemented;
+#if false
             OnFileRead(fileName);
             try
             {
                 security = info.IsDirectory
-                    ? (FileSystemSecurity)Directory.GetAccessControl(GetPath(fileName))
-                    : File.GetAccessControl(GetPath(fileName));
+                    ? (FileSystemSecurity)Directory_GetAccessControl(GetPath(fileName))
+                    : File_GetAccessControl(GetPath(fileName));
                 return Trace(nameof(GetFileSecurity), fileName, info, DokanResult.Success, sections.ToString());
             }
             catch (UnauthorizedAccessException)
@@ -690,21 +1063,24 @@ namespace BuildFs
                 security = null;
                 return Trace(nameof(GetFileSecurity), fileName, info, DokanResult.AccessDenied, sections.ToString());
             }
+#endif
         }
 
         public NtStatus SetFileSecurity(string fileName, FileSystemSecurity security, AccessControlSections sections,
             DokanFileInfo info)
         {
+            return NtStatus.Success;
+#if false
             OnFileChanged(fileName);
             try
             {
                 if (info.IsDirectory)
                 {
-                    Directory.SetAccessControl(GetPath(fileName), (DirectorySecurity)security);
+                    Directory_SetAccessControl(GetPath(fileName), (DirectorySecurity)security);
                 }
                 else
                 {
-                    File.SetAccessControl(GetPath(fileName), (FileSecurity)security);
+                    File_SetAccessControl(GetPath(fileName), (FileSecurity)security);
                 }
                 return Trace(nameof(SetFileSecurity), fileName, info, DokanResult.Success, sections.ToString());
             }
@@ -712,8 +1088,10 @@ namespace BuildFs
             {
                 return Trace(nameof(SetFileSecurity), fileName, info, DokanResult.AccessDenied, sections.ToString());
             }
+#endif
         }
 
+        
         public NtStatus Mounted(DokanFileInfo info)
         {
             return Trace(nameof(Mounted), null, info, DokanResult.Success);
@@ -742,6 +1120,10 @@ namespace BuildFs
         public IList<FileInformation> FindFilesHelper(string fileName, string searchPattern)
         {
             OnFileRead(fileName);
+            if (searchPattern.Contains("command-save"))
+            {
+                SaveChanges((path, entry) => false);
+            }
             searchPattern = searchPattern.Replace('>', '?');
             searchPattern = searchPattern.Replace('<', '*');
             /*if (fileName == "\\")
@@ -757,46 +1139,143 @@ namespace BuildFs
                 var path = Path.Combine(k, searchPattern);
                 var attr = GetFileAttributes(path);
                 if (attr == FileAttributes_NotFound) return Array.Empty<FileInformation>();
-                FileSystemInfo finfo;
-                if (IsDirectory(attr)) finfo = new DirectoryInfo(path);
-                else finfo = new FileInfo(path);
-                return new FileInformation[] {
-                    new FileInformation
-                    {
-                        Attributes = finfo.Attributes,
-                        CreationTime = finfo.CreationTime,
-                        LastAccessTime = finfo.LastAccessTime,
-                        LastWriteTime = finfo.LastWriteTime,
-                        Length = (finfo as FileInfo)?.Length ?? 0,
-                        FileName = finfo.Name
-                    }
-                };
+
+                return new[] { GetFileInformation(Path.Combine(fileName, searchPattern), attr) };
             }
 
-            IList<FileInformation> files = new DirectoryInfo(k)
-                .GetFileSystemInfos(searchPattern)
-                .Select(finfo => new FileInformation
+            lock (InMemory)
+            {
+                var physicalPath = GetPath(fileName);
+                var entry = TryGetEntryHasLock(physicalPath);
+                if (entry != null)
                 {
-                    Attributes = finfo.Attributes,
-                    CreationTime = finfo.CreationTime,
-                    LastAccessTime = finfo.LastAccessTime,
-                    LastWriteTime = finfo.LastWriteTime,
-                    Length = (finfo as FileInfo)?.Length ?? 0,
-                    FileName = finfo.Name
-                }).ToArray();
+                    return entry.Items.Where(x => MatchesPattern(x, searchPattern)).Select(x => 
+                    {
+                        var m = Path.Combine(fileName, x);
+                        return GetFileInformation(m, GetFileAttributes(GetPath(m)));
+                    }).ToArray();
+                }
+                else
+                {
 
-            return files;
+                    IList<FileInformation> files = new DirectoryInfo(k)
+                        .GetFileSystemInfos(searchPattern)
+                        .Select(finfo => new FileInformation
+                        {
+                            Attributes = finfo.Attributes,
+                            CreationTime = finfo.CreationTime,
+                            LastAccessTime = finfo.LastAccessTime,
+                            LastWriteTime = finfo.LastWriteTime,
+                            Length = (finfo as FileInfo)?.Length ?? 0,
+                            FileName = finfo.Name
+                        }).ToArray();
+
+                    return files;
+                }
+            }
+
         }
-        /*internal static bool InternalExists(string path)
+
+        public void SaveChanges(Func<string, Entry, bool> shouldIgnoreFile)
         {
-            Win32Native.WIN32_FILE_ATTRIBUTE_DATA wIN32_FILE_ATTRIBUTE_DATA = default(Win32Native.WIN32_FILE_ATTRIBUTE_DATA);
-            return File.FillAttributeInfo(path, ref wIN32_FILE_ATTRIBUTE_DATA, false, true) == 0 && wIN32_FILE_ATTRIBUTE_DATA.fileAttributes != -1 && (wIN32_FILE_ATTRIBUTE_DATA.fileAttributes & 16) == 0;
-        }*/
+            lock (InMemory)
+            {
+                var stillInUse = new List<KeyValuePair<string, Entry>>();
+                foreach (var item in InMemory)
+                {
+                    var physicalPath = item.Key;
+                    var entry = item.Value;
 
-        [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
-        static extern uint GetFileAttributes(string lpFileName);
 
-        private static bool FileOrFolderExists(string path)
+                    var attr = NativeMethods.GetFileAttributes(physicalPath);
+                    if (attr != FileAttributes_NotFound && (entry.Attributes == default(FileAttributes) || IsDirectory((uint)entry.Attributes) != IsDirectory(attr)))
+                    {
+                        Console.WriteLine("Deleted: " + physicalPath);
+                        if (IsDirectory(attr)) Directory.Delete(physicalPath);
+                        else File.Delete(physicalPath);
+                    }
+
+                    if (entry.OpenHandles != 0)
+                    {
+                        stillInUse.Add(item);
+                    }
+
+                    if (entry.Contents != null)
+                    {
+                        if (shouldIgnoreFile(physicalPath, entry)) continue;
+                        Console.WriteLine("Written: " + physicalPath);
+                        Directory.CreateDirectory(Path.GetDirectoryName(physicalPath));
+                        var tempName = physicalPath + ".shaman-fs-tmp.tmp";
+                        using (var f = File.Open(tempName, FileMode.Create, System.IO.FileAccess.Write, FileShare.Delete))
+                        {
+                            var cpy = new MemoryStream(entry.Contents.GetBuffer(), 0, (int)entry.Contents.Length, false);
+                            cpy.CopyTo(f);
+                        }
+                        File.Delete(physicalPath);
+                        File.SetLastWriteTimeUtc(tempName, entry.LastWriteTimeUtc);
+                        File.Move(tempName, physicalPath);
+                        attr = (uint)FileAttributes.Normal;
+                    }
+
+
+                    if (entry.Attributes != default(FileAttributes) && attr != (uint)entry.Attributes)
+                    {
+                        Console.WriteLine("Changed attributes: " + physicalPath);
+                        if (attr == FileAttributes_NotFound && IsDirectory((uint)entry.Attributes)) Directory.CreateDirectory(physicalPath);
+                        File.SetAttributes(physicalPath, entry.Attributes);
+                    }
+                    
+                    
+                }
+                InMemory.Clear();
+                foreach (var item in stillInUse)
+                {
+                    Console.WriteLine("Still in use: "+item.Key);
+                    InMemory.Add(item.Key, item.Value);
+                }
+            }
+        }
+
+
+        public void DeleteInMemoryFiles(Func<string, Entry, bool> canDeleteFile, int targetMemoryUsage)
+        {
+            lock (InMemory)
+            {
+                var totalBytes = GetInMemoryUsage();
+                foreach (var item in InMemory.OrderByDescending(x=>(x.Value.Contents?.Capacity).GetValueOrDefault()).ToList())
+                {
+                    if (totalBytes < targetMemoryUsage) break;
+                    var entry = item.Value;
+                    if (entry.Attributes != default(FileAttributes) && !IsDirectory((uint)entry.Attributes))
+                    {
+                        if (canDeleteFile(item.Key, entry))
+                        {
+                            Console.WriteLine("Remove from cache: " + item.Key);
+                            totalBytes -= item.Value.Contents.Capacity;
+                            if (entry.OpenHandles == 0) entry.Contents.Dispose();
+                            InMemory.Remove(item.Key);
+                        }
+                    }
+                }
+            }
+        }
+
+        public int GetInMemoryUsage()
+        {
+            lock (InMemory)
+            {
+                return InMemory.Sum(x => (x.Value.Contents?.Capacity).GetValueOrDefault());
+            }
+        }
+
+        /*internal static bool InternalExists(string path)
+{
+   Win32Native.WIN32_FILE_ATTRIBUTE_DATA wIN32_FILE_ATTRIBUTE_DATA = default(Win32Native.WIN32_FILE_ATTRIBUTE_DATA);
+   return File.FillAttributeInfo(path, ref wIN32_FILE_ATTRIBUTE_DATA, false, true) == 0 && wIN32_FILE_ATTRIBUTE_DATA.fileAttributes != -1 && (wIN32_FILE_ATTRIBUTE_DATA.fileAttributes & 16) == 0;
+}*/
+
+
+        private bool FileOrFolderExists(string path)
         {
             return GetFileAttributes(path) != FileAttributes_NotFound;
         }
@@ -824,7 +1303,7 @@ namespace BuildFs
 
             var fs = new CacheFs();
             fs.Letter = letter;
-            var t = Task.Run(() => Dokan.Mount(fs, letter + ":", DokanOptions.DebugMode/* | DokanOptions.StderrOutput*/, 1));
+            var t = Task.Run(() => Dokan.Mount(fs, letter + ":", DokanOptions.DebugMode /*| DokanOptions.StderrOutput*/, 1));
             var e = Stopwatch.StartNew();
             while (e.ElapsedMilliseconds < 3000)
             {
@@ -835,6 +1314,6 @@ namespace BuildFs
             return fs;
         }
 
-        #endregion Implementation of IDokanOperations
+#endregion Implementation of IDokanOperations
     }
 }

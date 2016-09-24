@@ -19,6 +19,41 @@ namespace BuildFs
         static void Main(string[] args)
         {
 
+            var cache = CacheFs.Mount('Q');
+            Task.Run(() =>
+            {
+                while (true)
+                {
+                    Thread.Sleep(5000);
+                    var usage = cache.GetInMemoryUsage() / 1024 / 1024;
+                    Console.WriteLine("Usage: " + usage + " MB");
+                }
+            });
+
+            Task.Run(() =>
+            {
+                while (true)
+                {
+                    Thread.Sleep(2 * 60 * 1000);
+                    Console.WriteLine("DeleteInMemoryFiles");
+                    cache.DeleteInMemoryFiles((path, entry) => entry.OpenHandles == 0 && path.IndexOf("cache2\\entries", StringComparison.OrdinalIgnoreCase) != -1, 60 * 1024 * 1024);
+                }
+            });
+
+            Task.Run(() =>
+            {
+                while (true)
+                {
+                    Thread.Sleep(3 * 60 * 1000);
+                    Console.WriteLine("SaveChanges");
+                    cache.SaveChanges((path, entry) => entry.OpenHandles == 0 && path.IndexOf("cache2\\entries", StringComparison.OrdinalIgnoreCase) != -1);
+                }
+            });
+
+            while (true) Thread.Sleep(1000000);
+            
+
+            return;
             var fs = BuildFsFileSystem.Mount('R');
             // TODO: docgen, finaldoc
 
@@ -61,9 +96,9 @@ namespace BuildFs
             {
                 Console.WriteLine(ex.Message);
             }
-            
+
             //while (true) Thread.Sleep(400000);
-            
+
         }
 
         private static void RunAwdeeGrunt(BuildFsFileSystem fs, string name)
