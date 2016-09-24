@@ -114,7 +114,7 @@ namespace BuildFs
                 fileName.IndexOf('>') != -1 ||
                 fileName.IndexOf('<') != -1
                 ) return NtStatus.ObjectNameInvalid;
-                
+
             OnFileRead(fileName);
             if ((access & modifies) != 0)
             {
@@ -296,7 +296,7 @@ namespace BuildFs
                 Console.WriteLine(DokanFormat($"{nameof(Cleanup)}('{fileName}', {info} - entering"));
 #endif
 
-            (info.Context as FileStream)?.Dispose();
+            (info.Context as Stream)?.Dispose();
             info.Context = null;
 
             if (info.DeleteOnClose)
@@ -321,7 +321,7 @@ namespace BuildFs
                 Console.WriteLine(DokanFormat($"{nameof(CloseFile)}('{fileName}', {info} - entering"));
 #endif
 
-            (info.Context as FileStream)?.Dispose();
+            (info.Context as Stream)?.Dispose();
             info.Context = null;
             Trace(nameof(CloseFile), fileName, info, DokanResult.Success);
             // could recreate cleanup code here but this is not called sometimes
@@ -340,7 +340,7 @@ namespace BuildFs
             }
             else // normal read
             {
-                var stream = info.Context as FileStream;
+                var stream = info.Context as Stream;
                 lock (stream) //Protect from overlapped read
                 {
                     stream.Position = offset;
@@ -353,6 +353,7 @@ namespace BuildFs
 
         private void OnFileChanged(string fileName)
         {
+            Console.WriteLine("Change: " + fileName);
         }
 
         private byte[] CaptureHash(string fileName)
@@ -388,7 +389,7 @@ namespace BuildFs
             }
             else
             {
-                var stream = info.Context as FileStream;
+                var stream = info.Context as Stream;
                 lock (stream) //Protect from overlapped write
                 {
                     stream.Position = offset;
@@ -404,7 +405,7 @@ namespace BuildFs
         {
             try
             {
-                ((FileStream)(info.Context)).Flush();
+                ((Stream)(info.Context)).Flush();
                 return Trace(nameof(FlushFileBuffers), fileName, info, DokanResult.Success);
             }
             catch (IOException)
@@ -546,7 +547,7 @@ namespace BuildFs
             var newpath = GetPathAware(newName);
             if (newpath == null) return DokanResult.PathNotFound;
 
-            (info.Context as FileStream)?.Dispose();
+            (info.Context as Stream)?.Dispose();
             info.Context = null;
 
             var exist = info.IsDirectory ? Directory.Exists(newpath) : File.Exists(newpath);
@@ -592,7 +593,7 @@ namespace BuildFs
             OnFileChanged(fileName);
             try
             {
-                ((FileStream)(info.Context)).SetLength(length);
+                ((Stream)(info.Context)).SetLength(length);
                 return Trace(nameof(SetEndOfFile), fileName, info, DokanResult.Success,
                     length.ToString(CultureInfo.InvariantCulture));
             }
@@ -608,7 +609,7 @@ namespace BuildFs
             OnFileChanged(fileName);
             try
             {
-                ((FileStream)(info.Context)).SetLength(length);
+                ((Stream)(info.Context)).SetLength(length);
                 return Trace(nameof(SetAllocationSize), fileName, info, DokanResult.Success,
                     length.ToString(CultureInfo.InvariantCulture));
             }
@@ -621,9 +622,10 @@ namespace BuildFs
 
         public NtStatus LockFile(string fileName, long offset, long length, DokanFileInfo info)
         {
+            Console.WriteLine("Lock: " + fileName);
             try
             {
-                ((FileStream)(info.Context)).Lock(offset, length);
+                (info.Context as FileStream).Lock(offset, length);
                 return Trace(nameof(LockFile), fileName, info, DokanResult.Success,
                     offset.ToString(CultureInfo.InvariantCulture), length.ToString(CultureInfo.InvariantCulture));
             }
@@ -636,9 +638,10 @@ namespace BuildFs
 
         public NtStatus UnlockFile(string fileName, long offset, long length, DokanFileInfo info)
         {
+            Console.WriteLine("Unlock: " + fileName);
             try
             {
-                ((FileStream)(info.Context)).Unlock(offset, length);
+                (info.Context as FileStream).Unlock(offset, length);
                 return Trace(nameof(UnlockFile), fileName, info, DokanResult.Success,
                     offset.ToString(CultureInfo.InvariantCulture), length.ToString(CultureInfo.InvariantCulture));
             }
