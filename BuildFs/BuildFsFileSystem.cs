@@ -508,7 +508,9 @@ namespace BuildFs
                 OnFileChanged(fileName);
                 if (info.IsDirectory)
                 {
-                    Directory.Delete(GetPath(fileName));
+                    var path = GetPath(fileName);
+                    if (Directory.Exists(path))
+                        Directory.Delete(path);
                 }
                 else
                 {
@@ -798,10 +800,12 @@ namespace BuildFs
         public NtStatus DeleteDirectory(string fileName, DokanFileInfo info)
         {
             OnFileChanged(fileName);
-            var result = Directory.EnumerateFileSystemEntries(GetPath(fileName)).Any()
+            var path = GetPath(fileName);
+            if (!Directory.Exists(path)) return NtStatus.Success;
+            var result = Directory.EnumerateFileSystemEntries(path).Any()
                     ? DokanResult.DirectoryNotEmpty
                     : DokanResult.Success;
-            Directory.Delete(fileName);
+            Directory.Delete(path);
             return Trace(nameof(DeleteDirectory), fileName, info, result);
             // if dir is not empty it can't be deleted
         }
