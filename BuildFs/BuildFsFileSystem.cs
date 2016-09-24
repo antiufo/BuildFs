@@ -483,6 +483,11 @@ namespace BuildFs
                 result);
         }
 
+        private static uint GetFileAttributes(string filePath)
+        {
+            return NativeMethods.GetFileAttributes(filePath);
+        }
+
         static bool IsDirectory(uint attrs)
         {
             return (attrs & (uint)FileAttributes.Directory) != 0;
@@ -793,10 +798,11 @@ namespace BuildFs
         public NtStatus DeleteDirectory(string fileName, DokanFileInfo info)
         {
             OnFileChanged(fileName);
-            return Trace(nameof(DeleteDirectory), fileName, info,
-                Directory.EnumerateFileSystemEntries(GetPath(fileName)).Any()
+            var result = Directory.EnumerateFileSystemEntries(GetPath(fileName)).Any()
                     ? DokanResult.DirectoryNotEmpty
-                    : DokanResult.Success);
+                    : DokanResult.Success;
+            Directory.Delete(fileName);
+            return Trace(nameof(DeleteDirectory), fileName, info, result);
             // if dir is not empty it can't be deleted
         }
 
@@ -1057,8 +1063,6 @@ namespace BuildFs
             return File.FillAttributeInfo(path, ref wIN32_FILE_ATTRIBUTE_DATA, false, true) == 0 && wIN32_FILE_ATTRIBUTE_DATA.fileAttributes != -1 && (wIN32_FILE_ATTRIBUTE_DATA.fileAttributes & 16) == 0;
         }*/
 
-        [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
-        static extern uint GetFileAttributes(string lpFileName);
 
         private static bool FileOrFolderExists(string path)
         {
