@@ -923,8 +923,8 @@ namespace BuildFs
         public NtStatus GetVolumeInformation(out string volumeLabel, out FileSystemFeatures features,
             out string fileSystemName, DokanFileInfo info)
         {
-            volumeLabel = "DOKAN";
-            fileSystemName = "NTFS";
+            volumeLabel = "BuildFs";
+            fileSystemName = "BuildFs";
 
             features = FileSystemFeatures.CasePreservedNames | FileSystemFeatures.CaseSensitiveSearch |
                        FileSystemFeatures.PersistentAcls | FileSystemFeatures.SupportsRemoteStorage |
