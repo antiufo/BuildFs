@@ -18,7 +18,7 @@ namespace BuildFs
 
         static void Main(string[] args)
         {
-
+#if false
             var cache = CacheFs.Mount('Q');
             Task.Run(() =>
             {
@@ -51,53 +51,53 @@ namespace BuildFs
             });
 
             while (true) Thread.Sleep(1000000);
-            
-
             return;
-            var fs = BuildFsFileSystem.Mount('R');
+#endif
+
+
             // TODO: docgen, finaldoc
-
+            var fs = BuildFsFileSystem.Mount('R', DokanOptions.FixedDrive);
             fs.AddProject(@"C:\Repositories\Awdee", "awdee");
-
-            try
+            if (true)
             {
+                try
+                {
 
-                //RunAwdeeNmake(fs, "nuget-restore");
-                RunAwdeeNmake(fs, "confuser-cs");
-                RunAwdeeNmake(fs, "core-available-location-icons");
-                RunAwdeeNmake(fs, "core-phantomts");
-                RunAwdeeNmake(fs, "core-compile");
+                    //RunAwdeeNmake(fs, "nuget-restore");
+                    RunAwdeeNmake(fs, "confuser-cs");
+                    RunAwdeeNmake(fs, "core-available-location-icons");
+                    RunAwdeeNmake(fs, "core-adblock-update");
+                    RunAwdeeNmake(fs, "core-phantomts");
+                    RunAwdeeNmake(fs, "core-compile");
+                    RunAwdeeNmake(fs, "service-models-compile");
 
-                //// website-all
-                RunAwdeeNmake(fs, "website-css-generator");
-                RunAwdeeNmake(fs, "website-grunt-install");
-                RunAwdeeNmake(fs, "website-json-css");
-                RunAwdeeNmake(fs, "website-copyjs");
-                RunAwdeeGrunt(fs, "less");
-                RunAwdeeGrunt(fs, "typescript:base");
-                RunAwdeeGrunt(fs, "uglify:editor");
-                RunAwdeeGrunt(fs, "uglify:offload");
-                RunAwdeeGrunt(fs, "uglify:admin");
-                RunAwdeeGrunt(fs, "uglify:explore");
-                RunAwdeeGrunt(fs, "uglify:ace");
-                RunAwdeeGrunt(fs, "uglify:explorehtml");
-                RunAwdeeNmake(fs, "website-files-folder");
-                RunAwdeeNmake(fs, "website-restore");
+                    RunAwdeeNmake(fs, "website-css-generator");
+                    RunAwdeeNmake(fs, "website-grunt-install");
+                    RunAwdeeNmake(fs, "website-copyjs");
+                    RunAwdeeGrunt(fs, "less");
+                    RunAwdeeGrunt(fs, "typescript:base");
+                    RunAwdeeGrunt(fs, "uglify:editor");
+                    RunAwdeeGrunt(fs, "uglify:offload");
+                    RunAwdeeGrunt(fs, "uglify:admin");
+                    RunAwdeeGrunt(fs, "uglify:explore");
+                    RunAwdeeGrunt(fs, "uglify:ace");
+                    RunAwdeeGrunt(fs, "uglify:explorehtml");
+                    RunAwdeeNmake(fs, "website-files-folder");
+                    RunAwdeeNmake(fs, "website-restore");
+                    RunAwdeeNmake(fs, "website-dlls");
 
-                RunAwdeeNmake(fs, "core-adblock-update");
-                RunAwdeeNmake(fs, "core-compile");
-                RunAwdeeNmake(fs, "ws-refasm-copy-orig");
-                RunAwdeeNmake(fs, "ws-refasm");
-                RunAwdeeNmake(fs, "ws-refasm-shaman");
-                if (Debugger.IsAttached)
+                    RunAwdeeNmake(fs, "ws-refasm-copy-orig");
+                    RunAwdeeNmake(fs, "ws-refasm");
+                    RunAwdeeNmake(fs, "ws-refasm-shaman");
                     Console.WriteLine("Done.");
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine(ex.Message);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine(ex.Message);
+                }
             }
 
-            //while (true) Thread.Sleep(400000);
+            while (true) Thread.Sleep(400000);
 
         }
 
