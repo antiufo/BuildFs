@@ -27,13 +27,14 @@ namespace BuildFs
             try
             {
 
-                RunAwdeeNmake(fs, "nuget-restore");
+                //RunAwdeeNmake(fs, "nuget-restore");
                 RunAwdeeNmake(fs, "confuser-cs");
                 RunAwdeeNmake(fs, "core-available-location-icons");
                 RunAwdeeNmake(fs, "core-phantomts");
                 RunAwdeeNmake(fs, "core-compile");
 
                 //// website-all
+                RunAwdeeNmake(fs, "website-css-generator");
                 RunAwdeeNmake(fs, "website-grunt-install");
                 RunAwdeeNmake(fs, "website-json-css");
                 RunAwdeeNmake(fs, "website-copyjs");
