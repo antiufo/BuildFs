@@ -177,6 +177,7 @@ namespace BuildFs
                             {
                             }
 
+                            OnFileChanged(fileName);
                             Directory.CreateDirectory(GetPath(fileName));
                             break;
                     }
