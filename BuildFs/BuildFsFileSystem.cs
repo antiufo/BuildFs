@@ -1086,13 +1086,13 @@ namespace BuildFs
             return Trace(nameof(FindFilesWithPattern), fileName, info, DokanResult.Success);
         }
 
-        public static BuildFsFileSystem Mount(char letter)
+        public static BuildFsFileSystem Mount(char letter, DokanOptions options)
         {
             Dokan.Unmount(letter);
 
             var fs = new BuildFsFileSystem();
             fs.Letter = letter;
-            var t = Task.Run(() => Dokan.Mount(fs, letter + ":", DokanOptions.DebugMode/* | DokanOptions.StderrOutput*/, 1));
+            var t = Task.Run(() => Dokan.Mount(fs, letter + ":", options, 1));
             var e = Stopwatch.StartNew();
             while (e.ElapsedMilliseconds < 3000)
             {
