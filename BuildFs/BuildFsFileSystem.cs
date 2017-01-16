@@ -41,6 +41,12 @@ namespace BuildFs
             RunCached(proj, key, () =>
             {
                 Console.WriteLine("Running from " + workingDir + ": " + ProcessUtils.GetCommandLine(command, args));
+                command = BuildFsApi.FindPath(command, workingDir);
+                if (command.EndsWith(".cmd") || command.EndsWith(".bat"))
+                {
+                    args = new[] { "/c", command }.Concat(args).ToArray();
+                    command = "cmd.exe";
+                }
                 ProcessUtils.RunPassThroughFrom(workingDir, command, args);
             });
         }
