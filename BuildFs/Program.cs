@@ -7,114 +7,89 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Runtime.Remoting;
+using System.Runtime.Remoting.Channels;
+using System.Runtime.Remoting.Channels.Ipc;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 
 namespace BuildFs
 {
-    class Program
+    partial class Program
     {
 
         static void Main(string[] args)
         {
-#if false
-            var cache = CacheFs.Mount('Q');
-            Task.Run(() =>
-            {
-                while (true)
-                {
-                    Thread.Sleep(5000);
-                    var usage = cache.GetInMemoryUsage() / 1024 / 1024;
-                    Console.WriteLine("Usage: " + usage + " MB");
-                }
-            });
 
-            Task.Run(() =>
-            {
-                while (true)
-                {
-                    Thread.Sleep(2 * 60 * 1000);
-                    Console.WriteLine("DeleteInMemoryFiles");
-                    cache.DeleteInMemoryFiles((path, entry) => entry.OpenHandles == 0 && path.IndexOf("cache2\\entries", StringComparison.OrdinalIgnoreCase) != -1, 60 * 1024 * 1024);
-                }
-            });
+            var letter = 'R';
 
-            Task.Run(() =>
-            {
-                while (true)
-                {
-                    Thread.Sleep(3 * 60 * 1000);
-                    Console.WriteLine("SaveChanges");
-                    cache.SaveChanges((path, entry) => entry.OpenHandles == 0 && path.IndexOf("cache2\\entries", StringComparison.OrdinalIgnoreCase) != -1);
-                }
-            });
+            var chan = new IpcChannel(BuildFs.BuildFsApi.IpcChannelName);
+            ChannelServices.RegisterChannel(chan, false);
+            RemotingConfiguration.RegisterWellKnownServiceType(typeof(BuildFsApiImpl), BuildFsApi.IpcChannelName, WellKnownObjectMode.Singleton);
 
-            while (true) Thread.Sleep(1000000);
-            return;
-#endif
-
-
-            // TODO: docgen, finaldoc
-            var fs = BuildFsFileSystem.Mount('R', DokanOptions.FixedDrive);
-            fs.AddProject(@"C:\Repositories\Awdee", "awdee");
-            if (true)
+            var fs = BuildFsFileSystem.Mount(letter, DokanOptions.FixedDrive);
+            //fs.ForceRun = true;
+            BuildFsApiImpl.Run = (location, commandLine, folder, custom) =>
             {
                 try
                 {
+                    if (custom)
+                    {
+                        folder = Path.GetFullPath(folder);
+                        var components = folder.SplitFast('\\', StringSplitOptions.RemoveEmptyEntries);
+                        if (components[0].ToUpper() != letter + ":") throw new Exception("Must be run in BuildFs drive.");
 
-                    //RunAwdeeNmake(fs, "nuget-restore");
-                    RunAwdeeNmake(fs, "confuser-cs");
-                    RunAwdeeNmake(fs, "core-available-location-icons");
-                    RunAwdeeNmake(fs, "core-adblock-update");
-                    RunAwdeeNmake(fs, "core-phantomts");
-                    RunAwdeeNmake(fs, "core-compile");
-                    RunAwdeeNmake(fs, "service-models-compile");
+                        string exe;
+                        string arguments;
+                        BuildFsApi.ParseCommandLine(commandLine, out exe, out arguments);
+                        commandLine = arguments;
+                        BuildFsApi.ParseCommandLine(commandLine, out exe, out arguments);
 
-                    RunAwdeeNmake(fs, "website-css-generator");
-                    RunAwdeeNmake(fs, "website-grunt-install");
-                    RunAwdeeNmake(fs, "website-copyjs");
-                    RunAwdeeGrunt(fs, "less");
-                    RunAwdeeGrunt(fs, "typescript:base");
-                    RunAwdeeGrunt(fs, "uglify:editor");
-                    RunAwdeeGrunt(fs, "uglify:offload");
-                    RunAwdeeGrunt(fs, "uglify:admin");
-                    RunAwdeeGrunt(fs, "uglify:explore");
-                    RunAwdeeGrunt(fs, "uglify:ace");
-                    RunAwdeeGrunt(fs, "uglify:explorehtml");
-                    RunAwdeeNmake(fs, "website-files-folder");
-                    RunAwdeeNmake(fs, "website-restore");
-                    RunAwdeeNmake(fs, "website-dlls");
+                        fs.RunCached(components[1], string.Join("\\", components.Skip(2)), exe, arguments);
+                    }
+                    else
+                    {
 
-                    RunAwdeeNmake(fs, "ws-refasm-copy-orig");
-                    RunAwdeeNmake(fs, "ws-refasm");
-                    RunAwdeeNmake(fs, "ws-refasm-shaman");
-                    Console.WriteLine("Done.");
+                        var projname = "project";
+                        var find = @"C:\Path\To\Project";
+                        var replace = letter + @":\" + projname;
+                        string exe;
+                        string arguments;
+                        folder = folder.Replace(find, replace);
+                        commandLine = commandLine.Replace(find, replace);
+                        BuildFsApi.ParseCommandLine(commandLine, out exe, out arguments);
+
+                        var realexe = Path.Combine(Path.GetDirectoryName(location), Path.GetFileNameWithoutExtension(location) + "-real.exe");
+                        fs.RunCached(projname, folder, realexe, new ProcessUtils.RawCommandLineArgument(arguments));
+                    }
+                    Console.WriteLine("Success.");
+                    return 0;
                 }
-                catch (Exception ex)
+                catch (ProcessException ex)
                 {
-                    Console.WriteLine(ex.Message);
+                    Console.WriteLine("Failed with " + ex.ExitCode);
+                    return ex.ExitCode;
                 }
-            }
+            };
+
+
+            //MainInternal(args, fs);
+
+
+            // Example:
+
+            //fs.AddProject(@"C:\Path\To\Project", "project");
+            //fs.RunCached("project", "subdir", "nmake", "part-1");
+            //fs.RunCached("project", "subdir", "nmake", "part-2");
+
+
 
             while (true) Thread.Sleep(400000);
 
         }
 
-        private static void RunAwdeeGrunt(BuildFsFileSystem fs, string name)
-        {
-            RunAwdee(fs, "Xamasoft.Awdee.WebSite", "cmd", "/c", "grunt", name);
-        }
 
-        private static void RunAwdeeNmake(BuildFsFileSystem fs, string v)
-        {
-            RunAwdee(fs, "Xamasoft.Awdee.Build", "nmake", v);
-        }
-
-        private static void RunAwdee(BuildFsFileSystem fs, string folder, string v, params object[] args)
-        {
-            fs.RunCached("awdee", folder, v, args);
-        }
 
 
     }
