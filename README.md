@@ -11,6 +11,6 @@ fs.AddProject(@"C:\Physical\Path\Example", "example");
 // R:\example will now represent/virtualize the physical folder
 
 fs.RunCached("example", "subdir", "nmake", "component-1");
-fs.RunCached("project", "subdir", "nmake", "component-2");
-fs.RunCached("project", "subdir", "nmake", "component-3");
+fs.RunCached("example", "subdir", "nmake", "component-2");
+fs.RunCached("example", "subdir", "nmake", "component-3");
 ```
