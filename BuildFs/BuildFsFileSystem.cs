@@ -52,6 +52,8 @@ namespace BuildFs
         }
 
 
+
+        public bool ForceRun { get; set; }
         public void RunCached(string proj, string key, Action action)
         {
             string keyHash;
@@ -69,7 +71,7 @@ namespace BuildFs
             {
                 using (var info = JsonFile.Open<ExecutionSummary>(Path.Combine("C:\\BuildFs\\Cache", keyHash + ".pb")))
                 {
-                    if (info.Content.Available && IsStatusStillValid(proj, info.Content))
+                    if (!ForceRun && info.Content.Available && IsStatusStillValid(proj, keyHash, info.Content))
                     {
                         Console.WriteLine("No need to run " + keyHash);
                         info.DiscardAll();
@@ -88,7 +90,18 @@ namespace BuildFs
         }
         private object _runLock = new object();
 
-        internal bool IsStatusStillValid(string v, ExecutionSummary changes)
+        private void WriteReexecutionReason(string v, string reason, string additionalInfo = null)
+        {
+            Console.WriteLine(reason);
+            if (additionalInfo != null) Console.WriteLine(additionalInfo);
+            Directory.CreateDirectory(Configuration_ReexecutionReasonLogFolder);
+            File.AppendAllLines(Path.Combine(Configuration_ReexecutionReasonLogFolder, v + ".txt"), new[] { additionalInfo != null ? reason + "    " + additionalInfo : reason }, Encoding.UTF8);
+        }
+
+        [Configuration]
+        private static string Configuration_ReexecutionReasonLogFolder = @"C:\BuildFs\ReexecutionReasons";
+
+        internal bool IsStatusStillValid(string v, string keyHash, ExecutionSummary changes)
         {
             lock (_lock)
             {
@@ -100,30 +113,27 @@ namespace BuildFs
                         var current = CaptureItemStatus(GetPathAware(old.Path)) ?? new ItemStatus();
                         if (current.Attributes == (FileAttributes)0 && old.Attributes != (FileAttributes)0)
                         {
-                            Console.WriteLine("Changed, no longer exists: " + old.Path);
+                            WriteReexecutionReason(keyHash, "Changed, no longer exists: " + old.Path);
                             return false;
                         }
                         if (current.Attributes != (FileAttributes)0 && old.Attributes == (FileAttributes)0)
                         {
-                            Console.WriteLine("Changed, new file exists: " + old.Path);
+                            WriteReexecutionReason(keyHash, "Changed, new file exists: " + old.Path);
                             return false;
                         }
                         if (current.Attributes != old.Attributes)
                         {
-                            Console.WriteLine("Changed attributes: " + old.Path);
-                            Console.WriteLine(old.Attributes + " -> " + current.Attributes);
+                            WriteReexecutionReason(keyHash, "Changed attributes: " + old.Path, old.Attributes + " -> " + current.Attributes);
                             return false;
                         }
                         if (current.LastWriteTime != old.LastWriteTime)
                         {
-                            Console.WriteLine("Changed last write time: " + old.Path);
-                            Console.WriteLine(old.LastWriteTime + " -> " + current.LastWriteTime);
+                            WriteReexecutionReason(keyHash, "Changed last write time: " + old.Path, old.LastWriteTime + " -> " + current.LastWriteTime);
                             return false;
                         }
                         if (current.Size != old.Size)
                         {
-                            Console.WriteLine("Changed size: " + old.Path);
-                            Console.WriteLine(old.Size + " -> " + current.Size);
+                            WriteReexecutionReason(keyHash, "Changed size: " + old.Path, old.Size + " -> " + current.Size);
                             return false;
                         }
 
