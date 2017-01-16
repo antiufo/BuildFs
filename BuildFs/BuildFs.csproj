@@ -72,6 +72,7 @@
     </Reference>
     <Reference Include="System" />
     <Reference Include="System.Core" />
+    <Reference Include="System.Runtime.Remoting" />
     <Reference Include="System.Xml.Linq" />
     <Reference Include="System.Data.DataSetExtensions" />
     <Reference Include="Microsoft.CSharp" />
@@ -80,6 +81,7 @@
     <Reference Include="System.Xml" />
   </ItemGroup>
   <ItemGroup>
+    <Compile Include="BuildFsApiImpl.cs" />
     <Compile Include="CacheFs.cs" />
     <Compile Include="BuildFsFileSystem.cs" />
     <Compile Include="Entry.cs" />
@@ -93,6 +95,12 @@
   <ItemGroup>
     <None Include="App.config" />
     <None Include="packages.config" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\BuildFsCommandForwarder\BuildFsCommandForwarder.csproj">
+      <Project>{3d2b1b8a-5c6d-4664-8578-6b1299705999}</Project>
+      <Name>BuildFsCommandForwarder</Name>
+    </ProjectReference>
   </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
   <!-- To modify your build process, add your task inside one of the targets below and uncomment it. 

@@ -1,11 +1,13 @@
 ﻿
 Microsoft Visual Studio Solution File, Format Version 12.00
 # Visual Studio 15
-VisualStudioVersion = 15.0.25618.0
+VisualStudioVersion = 15.0.25914.0
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "BuildFs", "BuildFs\BuildFs.csproj", "{13232D1D-64C7-4763-86C6-8C957E1A98E3}"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DokanNet.net4.6", "..\dokan-dotnet\DokanNet\DokanNet.net4.6.csproj", "{7EAF58F3-ECB0-4B08-B457-C1FD87CCE459}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "BuildFsCommandForwarder", "BuildFsCommandForwarder\BuildFsCommandForwarder.csproj", "{3D2B1B8A-5C6D-4664-8578-6B1299705999}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -31,6 +33,14 @@ Global
 		{7EAF58F3-ECB0-4B08-B457-C1FD87CCE459}.Release (.NET 4.0)|Any CPU.Build.0 = Release (.NET 4.0)|Any CPU
 		{7EAF58F3-ECB0-4B08-B457-C1FD87CCE459}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{7EAF58F3-ECB0-4B08-B457-C1FD87CCE459}.Release|Any CPU.Build.0 = Release|Any CPU
+		{3D2B1B8A-5C6D-4664-8578-6B1299705999}.Debug (.NET 4.0)|Any CPU.ActiveCfg = Debug|Any CPU
+		{3D2B1B8A-5C6D-4664-8578-6B1299705999}.Debug (.NET 4.0)|Any CPU.Build.0 = Debug|Any CPU
+		{3D2B1B8A-5C6D-4664-8578-6B1299705999}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{3D2B1B8A-5C6D-4664-8578-6B1299705999}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{3D2B1B8A-5C6D-4664-8578-6B1299705999}.Release (.NET 4.0)|Any CPU.ActiveCfg = Release|Any CPU
+		{3D2B1B8A-5C6D-4664-8578-6B1299705999}.Release (.NET 4.0)|Any CPU.Build.0 = Release|Any CPU
+		{3D2B1B8A-5C6D-4664-8578-6B1299705999}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{3D2B1B8A-5C6D-4664-8578-6B1299705999}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
